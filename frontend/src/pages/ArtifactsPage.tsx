@@ -18,7 +18,7 @@ const FORMAT_BADGES: Record<string, { label: string; className: string; icon: Re
 };
 
 const SOURCE_LABELS: Record<string, string> = {
-  "allai-copilot": "Copilot",
+  "allai-copilot": "allAI",
   "allai-query": "SQL Export",
   "allai-agent": "Agent",
   "manual": "Manual",

@@ -12,17 +12,19 @@ from app.core.channel_config import ChannelType
 # Static templates — no string interpolation of channel value (C4)
 CHANNEL_GREETINGS: dict[ChannelType, str] = {
     ChannelType.direct: (
-        "Hi! I'm allAI, your data copilot. I can help you process, explore, "
+        "Hi, I'm allAI (pronounced \"Ally\"), your data assistant. "
+        "I can help you process, explore, "
         "and query your data. What would you like to work on?"
     ),
     ChannelType.marketplace: (
-        "Hi! I'm your marketplace copilot. I'll help you get your data "
-        "listed on ai.market — from upload to publishing. Ready to start?"
+        "Hi, I'm allAI (pronounced \"Ally\"), your AIM Data assistant. "
+        "I can help you connect data sources, prepare datasets, and publish "
+        "on ai.market. What would you like to work on?"
     ),
     ChannelType.aim_data: (
-        "Hi! I'm your data management copilot. I'll help you upload, "
-        "organize, and publish your data on ai.market. What would you "
-        "like to work on?"
+        "Hi, I'm allAI (pronounced \"Ally\"), your AIM Data assistant. "
+        "I can help you connect data sources, prepare datasets, and publish "
+        "on ai.market. What would you like to work on?"
     ),
 }
 

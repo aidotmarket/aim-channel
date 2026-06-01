@@ -17,6 +17,7 @@ import CoPilotFab from "./components/copilot/CoPilotFab";
 import VersionBadge from "./components/VersionBadge";
 import Dashboard from "./pages/Dashboard";
 import Datasets from "./pages/Datasets";
+import ListDataPage from "./pages/ListDataPage";
 import DatasetDetail from "./pages/DatasetDetail";
 import EarningsPage from "./pages/EarningsPage";
 import SqlQuery from "./pages/SqlQuery";
@@ -140,6 +141,7 @@ const App = () => (
                   >
                     <Route path="/" element={<ChannelLanding />} />
                     <Route path="/datasets" element={<Datasets />} />
+                    <Route path="/list-data" element={<ListDataPage />} />
                     <Route path="/datasets/:id" element={<DatasetDetail />} />
                     <Route path="/raw-files/:id" element={<RawFileDetail />} />
                     <Route path="/earnings" element={<EarningsPage />} />

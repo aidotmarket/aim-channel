@@ -374,10 +374,10 @@ export const CoPilotProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 id: `welcome_${Date.now()}`,
                 role: "assistant" as const,
                 content: channel === "marketplace"
-                  ? "Hi! I'm your marketplace copilot. I'll help you get your data listed on ai.market - from upload to publishing. Ready to start?"
+                  ? "Hi, I'm allAI (pronounced \"Ally\"), your AIM Data assistant. I can help you connect data sources, prepare datasets, and publish on ai.market. What would you like to work on?"
                   : channel === "aim-data"
-                    ? "Hi! I'm your AIM Data copilot. I can help you connect S3, prepare datasets, and publish on ai.market. What would you like to work on?"
-                  : "Hi! I'm allAI, your data copilot. I can help you process, explore, and query your data. What would you like to work on?",
+                    ? "Hi, I'm allAI (pronounced \"Ally\"), your AIM Data assistant. I can help you connect data sources, prepare datasets, and publish on ai.market. What would you like to work on?"
+                  : "Hi, I'm allAI (pronounced \"Ally\"), your data assistant. I can help you process, explore, and query your data. What would you like to work on?",
                 createdAt: new Date().toISOString(),
               }];
             }

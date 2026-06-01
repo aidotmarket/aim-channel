@@ -29,6 +29,7 @@ interface NavItem {
 const ALL_NAV_ITEMS: NavItem[] = [
   { path: "/", label: "Dashboard", icon: LayoutDashboard },
   { path: "/datasets", label: "Datasets", icon: Database },
+  { path: "/list-data", label: "List Data", icon: FileOutput },
   { path: "/sql", label: "SQL Query", icon: Code },
   { path: "/databases", label: "Databases", icon: Database },
   { path: "/settings", label: "Settings", icon: Settings },
@@ -38,27 +39,27 @@ const ALL_NAV_ITEMS: NavItem[] = [
 
 // direct channel: data-focused items first, marketplace items at bottom
 const NAV_ORDER_DIRECT = [
-  "/", "/datasets", "/sql", "/databases", "/settings",
+  "/", "/datasets", "/list-data", "/sql", "/databases", "/settings",
   "/data-requests", "/earnings",
 ];
 
 // marketplace channel: marketplace items promoted to top, then data items
 const NAV_ORDER_MARKETPLACE = [
   "/data-requests", "/",
-  "/datasets", "/sql", "/databases",
+  "/datasets", "/list-data", "/sql", "/databases",
   "/earnings", "/settings",
 ];
 
 const NAV_ORDER_AIM_DATA = [
-  "/", "/datasets", "/data-requests",
+  "/", "/datasets", "/list-data", "/data-requests",
   "/sql", "/databases",
   "/earnings", "/settings",
 ];
 
 // Separator index: items after this index go in the bottom section
-const SEPARATOR_INDEX_DIRECT = 6;    // after Settings
+const SEPARATOR_INDEX_DIRECT = 7;    // after Settings
 const SEPARATOR_INDEX_MARKETPLACE = 2; // after Dashboard
-const SEPARATOR_INDEX_AIM_DATA = 4;
+const SEPARATOR_INDEX_AIM_DATA = 5;
 
 function getOrderedItems(channel: "direct" | "marketplace" | "aim-data"): { top: NavItem[]; bottom: NavItem[] } {
   const order = channel === "marketplace"

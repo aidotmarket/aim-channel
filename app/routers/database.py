@@ -413,11 +413,11 @@ def _run_extraction_pipeline(
                 row_limit=spec.get("row_limit"),
             )
 
-            # Bug 2: Update status to processing after extraction completes
+            # Update status while post-extraction analysis runs.
             with get_session_context() as session:
                 rec = session.get(DBDatasetRecord, dataset_id)
                 if rec:
-                    rec.status = DatasetStatus.INDEXING.value
+                    rec.status = DatasetStatus.EXTRACTING.value
                     rec.file_size_bytes = output_path.stat().st_size if output_path.exists() else 0
                     existing_meta = json.loads(rec.metadata_json) if rec.metadata_json else {}
                     existing_meta.update({"phase": "processing", "table": table_name})
@@ -443,15 +443,15 @@ def _run_extraction_pipeline(
             except Exception as meta_err:
                 logger.warning("Could not get DuckDB metadata for %s: %s", dataset_id, meta_err)
 
-            # Mark ready with metadata
+            # Mark processed with metadata.
             with get_session_context() as session:
                 rec = session.get(DBDatasetRecord, dataset_id)
                 if rec:
-                    rec.status = DatasetStatus.READY.value
+                    rec.status = DatasetStatus.PREVIEW_READY.value
                     rec.processed_path = str(processed_path)
                     existing_meta = json.loads(rec.metadata_json) if rec.metadata_json else {}
                     existing_meta.update(file_metadata)
-                    existing_meta["phase"] = "ready"
+                    existing_meta["phase"] = "preview_ready"
                     rec.metadata_json = json.dumps(existing_meta, default=str)
                     rec.updated_at = datetime.now(timezone.utc)
                     session.add(rec)

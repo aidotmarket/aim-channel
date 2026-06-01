@@ -2,7 +2,6 @@ import logging
 import os
 import uuid
 import asyncio
-import concurrent.futures
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
@@ -489,12 +488,11 @@ class ProcessingService:
     # Main entry point
     # ------------------------------------------------------------------
 
-    async def process_file(self, dataset_id: str, skip_indexing: bool = False) -> DatasetRecord:
+    async def process_file(self, dataset_id: str) -> DatasetRecord:
         """Process an uploaded file based on its type.
 
         Args:
             dataset_id: The dataset to process.
-            skip_indexing: If True, stop after extraction (preview mode).
 
         BQ-VZ-LARGE-FILES: Routes large files (>= LARGE_FILE_THRESHOLD_MB) to
         the streaming subprocess path. Falls back to in-memory for small files
@@ -592,35 +590,10 @@ class ProcessingService:
             self._save_record(record, storage_fn)
             return record
 
-        if skip_indexing:
-            record.status = DatasetStatus.PREVIEW_READY
-            record.updated_at = datetime.now(timezone.utc)
-            storage_fn = record.upload_path.name if record.upload_path else f"{dataset_id}"
-            self._save_record(record, storage_fn)
-            return record
-
-        # Phase 2: Index
-        record.status = DatasetStatus.INDEXING
+        self._run_post_extract_analysis(record)
+        self._enrich_metadata_from_duckdb(record)
+        record.status = DatasetStatus.PREVIEW_READY
         record.updated_at = datetime.now(timezone.utc)
-        storage_fn = record.upload_path.name if record.upload_path else f"{dataset_id}"
-        self._save_record(record, storage_fn)
-
-        try:
-            # Run indexing in thread pool so embedding computation
-            # doesn't block the event loop (health checks stay responsive)
-            await asyncio.get_event_loop().run_in_executor(
-                None, self._run_indexing, record,
-            )
-            record.status = DatasetStatus.READY
-            record.updated_at = datetime.now(timezone.utc)
-            # Bug 1: Populate metadata with DuckDB file stats at write time
-            self._enrich_metadata_from_duckdb(record)
-        except Exception as e:
-            record.status = DatasetStatus.ERROR
-            err_detail = str(e).split("\n")[0].strip()[:200]
-            record.error = f"Indexing failed: {err_detail}" if err_detail else "Indexing failed"
-            record.updated_at = datetime.now(timezone.utc)
-
         storage_fn = record.upload_path.name if record.upload_path else f"{dataset_id}"
         self._save_record(record, storage_fn)
         return record
@@ -877,105 +850,8 @@ class ProcessingService:
             raise ValueError(f"Streaming not supported for file type: {file_type}")
         log_mem_state("Worker Exit:streaming")
 
-    def _run_indexing(self, record: DatasetRecord) -> None:
-        """Phase 2: chunk → embed → Qdrant via streaming for memory safety.
-
-        Always uses the streaming indexing path (index_streaming) isolated
-        in a ProcessWorkerManager subprocess. This prevents the primary API
-        server from encountering MemoryErrors when PyTorch embeddings process
-        heavy arrays.
-        """
-        import time
-        if not record.processed_path or not record.processed_path.exists():
-            return
-
-        # Guard: defer indexing when available memory is critically low
-        import psutil
-        available_mb = psutil.virtual_memory().available / (1024 * 1024)
-        if available_mb < 500:
-            _log.warning(
-                "Low memory (%.0fMB free), deferring indexing for %s",
-                available_mb, record.id,
-            )
-            record.metadata["index_status"] = {"status": "deferred", "reason": "low_memory"}
-            return
-
-        handle = None
-        try:
-            from app.services.process_worker import get_worker_manager
-            from app.services.processing_queue import get_processing_queue
-
-            manager = get_worker_manager()
-            handle = manager.submit_indexing(record.id, record.processed_path)
-
-            timeout_s = settings.process_worker_timeout_s * 2  # Indexing gets 2x timeout
-            start_time = time.monotonic()
-
-            log_mem_state("Pre-Indexing")
-
-            # Subprocess spawned. Block to poll worker progress
-            _exitcode_logged = False
-            while getattr(handle.future, "is_alive", lambda: False)():
-                proc = handle.future
-                proc_exitcode = getattr(proc, "exitcode", None)
-                if proc_exitcode is not None and not _exitcode_logged:
-                    _exitcode_logged = True
-                    if proc_exitcode == -9:
-                        _log.error(f"Indexing subprocess OOM-killed (SIGKILL) for record {record.id}")
-                    elif proc_exitcode < 0:
-                        _log.error(f"Indexing subprocess killed by signal {-proc_exitcode} for record {record.id}")
-                    elif proc_exitcode > 0:
-                        _log.error(f"Indexing subprocess exited with code {proc_exitcode} for record {record.id}")
-
-                elapsed = time.monotonic() - start_time
-                if elapsed > timeout_s:
-                    handle.cancel()
-                    raise TimeoutError(f"Indexing worker exceeded {timeout_s}s timeout")
-
-                progress = handle.get_progress()
-                if progress:
-                    state = progress.get("status")
-                    if state == "processing":
-                        get_processing_queue().update_progress(
-                            record.id, "indexing", progress.get("pct", 50),
-                            f"{progress.get('rows_done', 0):,} / {progress.get('total_rows', 0):,} rows indexed"
-                        )
-                    elif state == "completed":
-                        record.metadata["index_status"] = progress.get("result", {"status": "success"})
-                        break
-                    elif state == "error":
-                        raise RuntimeError(progress.get("error", "Unknown worker error"))
-                    elif state == "cancelled":
-                        raise InterruptedError("Worker cancelled externally")
-                time.sleep(1)
-
-            # Ensures cleanup of handles
-            handle.wait()
-
-            # Exitcode diagnostics — capture WHY the subprocess died
-            proc_exitcode = getattr(handle.future, "exitcode", None)
-            if proc_exitcode is not None and proc_exitcode != 0:
-                if proc_exitcode == -9:
-                    _log.error("Indexing subprocess OOM-killed (SIGKILL) for record %s", record.id)
-                elif proc_exitcode < 0:
-                    _log.error("Indexing subprocess killed by signal %d for record %s", -proc_exitcode, record.id)
-                else:
-                    _log.error("Indexing subprocess exited with code %d for record %s", proc_exitcode, record.id)
-
-            if "index_status" not in record.metadata:
-                # Fallback if completion packet missed but worker dead
-                exit_detail = f" (exitcode={proc_exitcode})" if proc_exitcode is not None else ""
-                record.metadata["index_status"] = {"status": "error", "error": f"Index worker exited unexpectedly without completion packet{exit_detail}"}
-
-            log_mem_state("Post-Indexing")
-
-        except Exception as e:
-            _log.error("Indexing failed for dataset %s: %s", record.id, e, exc_info=True)
-            record.metadata["index_status"] = {"status": "error", "error": str(e)}
-        finally:
-            if handle is not None:
-                handle._cleanup()
-
+    def _run_post_extract_analysis(self, record: DatasetRecord) -> None:
+        """Run non-vector analysis after extraction completes."""
         # PII scan
         try:
             from app.services.pii_service import get_pii_service
@@ -998,49 +874,6 @@ class ProcessingService:
         except Exception as e:
             record.metadata["pii_scan"] = {"status": "scan_failed", "error": str(e)}
 
-    async def run_index_phase(self, dataset_id: str) -> DatasetRecord:
-        """Run only the index phase (called after confirm)."""
-        record = self.get_dataset(dataset_id)
-        if not record:
-            raise ValueError(f"Dataset {dataset_id} not found")
-
-        if self._is_cancelled(dataset_id):
-            record.status = DatasetStatus.CANCELLED
-            return record
-
-        record.status = DatasetStatus.INDEXING
-        record.updated_at = datetime.now(timezone.utc)
-        storage_fn = record.upload_path.name if record.upload_path else f"{dataset_id}"
-        self._save_record(record, storage_fn)
-
-        try:
-            # Run indexing in thread pool so embedding computation
-            # doesn't block the event loop (health checks stay responsive)
-            await asyncio.get_event_loop().run_in_executor(
-                None, self._run_indexing, record,
-            )
-            if self._is_cancelled(dataset_id):
-                record.status = DatasetStatus.CANCELLED
-            else:
-                record.status = DatasetStatus.READY
-                # Bug 1: Populate metadata with DuckDB file stats at write time
-                self._enrich_metadata_from_duckdb(record)
-                # BQ-VZ-HYBRID-SEARCH: Rebuild facets after new dataset is ready
-                try:
-                    from app.services.facet_service import rebuild_facets_async
-                    rebuild_facets_async()
-                except Exception:
-                    pass  # Non-critical
-            record.updated_at = datetime.now(timezone.utc)
-        except Exception as e:
-            record.status = DatasetStatus.ERROR
-            err_detail = str(e).split("\n")[0].strip()[:200]
-            record.error = f"Indexing failed: {err_detail}" if err_detail else "Indexing failed"
-            record.updated_at = datetime.now(timezone.utc)
-
-        self._save_record(record, storage_fn)
-        return record
-
     # Maximum time (seconds) allowed for converting a file to Parquet.
     # Large CSVs/TSVs (400MB+) may need several minutes.
     EXTRACT_TIMEOUT_S = 300  # 5 minutes
@@ -1054,7 +887,7 @@ class ProcessingService:
 
         with self._get_session() as session:
             stmt = select(DBDatasetRecord).where(
-                DBDatasetRecord.status.in_(["extracting", "indexing"])
+                DBDatasetRecord.status.in_(["extracting"])
             )
             stuck = session.exec(stmt).all()
             recovered = 0
@@ -1242,62 +1075,6 @@ class ProcessingService:
             if temp_csv.exists():
                 temp_csv.unlink()
 
-    @staticmethod
-    def _chunk_text(text: str, target_size: int = 800, overlap: int = 100) -> list[str]:
-        """Split text into chunks for better search and RAG.
-
-        Strategy: split on paragraph boundaries (double newlines), then merge
-        small paragraphs and split oversized ones to target ~target_size chars
-        with ~overlap char overlap between consecutive chunks.
-        """
-        if len(text) < 1000:
-            return [text] if text.strip() else []
-
-        # Split into paragraphs
-        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-        if not paragraphs:
-            return [text] if text.strip() else []
-
-        chunks: list[str] = []
-        current = ""
-
-        for para in paragraphs:
-            # If adding this paragraph exceeds target, flush current chunk
-            if current and len(current) + len(para) + 2 > target_size:
-                chunks.append(current)
-                # Start next chunk with overlap from end of current
-                if overlap > 0 and len(current) > overlap:
-                    current = current[-overlap:] + "\n\n" + para
-                else:
-                    current = para
-            else:
-                current = current + "\n\n" + para if current else para
-
-        if current.strip():
-            chunks.append(current)
-
-        # Split any remaining oversized chunks (single giant paragraphs)
-        final: list[str] = []
-        for chunk in chunks:
-            if len(chunk) <= target_size * 2:
-                final.append(chunk)
-            else:
-                # Force-split on sentence boundaries or fixed positions
-                pos = 0
-                while pos < len(chunk):
-                    end = min(pos + target_size, len(chunk))
-                    if end < len(chunk):
-                        # Try to break at sentence boundary
-                        for sep in ('. ', '.\n', '! ', '? ', '\n'):
-                            brk = chunk.rfind(sep, pos + target_size // 2, end + 200)
-                            if brk != -1:
-                                end = brk + len(sep)
-                                break
-                    final.append(chunk[pos:end].strip())
-                    pos = end - overlap if end < len(chunk) else end
-
-        return [c for c in final if c.strip()]
-
     def _process_text(self, record: DatasetRecord):
         """Process text files (.txt, .md, .html, .htm) using TextProcessor."""
         from app.services.text_processor import TextProcessor
@@ -1308,12 +1085,7 @@ class ProcessingService:
         full_text = content["text_content"]
         record.document_content = content
 
-        # Chunk text into blocks for better search and RAG
-        chunks = self._chunk_text(full_text)
-        if not chunks:
-            chunks = [full_text or ""]
-
-        # Convert to a searchable Parquet file
+        # Convert to a processed Parquet file with a single text block.
         parquet_filename = f"{record.id}.parquet"
         record.processed_path = self.processed_dir / parquet_filename
 
@@ -1323,8 +1095,7 @@ class ProcessingService:
             with open(temp_csv, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(['block_index', 'block_type', 'content'])
-                for i, chunk in enumerate(chunks):
-                    writer.writerow([i, 'text', chunk])
+                writer.writerow([0, 'text', full_text or ""])
 
             with ephemeral_duckdb_service() as duckdb:
                 safe_csv = sql_quote_literal(str(temp_csv))
@@ -1339,7 +1110,7 @@ class ProcessingService:
                 metadata = duckdb.get_file_metadata(record.processed_path)
                 metadata["source_type"] = "text"
                 metadata["original_format"] = record.file_type
-                metadata["text_blocks"] = len(chunks)
+                metadata["text_blocks"] = 1 if full_text else 0
                 metadata.update(content["metadata"])
                 record.metadata = metadata
 

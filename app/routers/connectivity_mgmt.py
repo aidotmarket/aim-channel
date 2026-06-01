@@ -93,7 +93,7 @@ class TestResponse(BaseModel):
     token_label: Optional[str] = None
     token_scopes: List[str] = []
     datasets_accessible: int = 0
-    sample_query_ok: bool = False
+    sample_sql_ok: bool = False
     latency_ms: Optional[int] = None
     error: Optional[str] = None
 
@@ -296,18 +296,10 @@ async def connectivity_test_token(
         results.error = _safe_error_category(e)
         return results
 
-    # Sample query
+    # SQL/profile/schema are the supported dataset-content paths after vector removal.
     if results.datasets_accessible > 0:
-        try:
-            from app.models.connectivity import VectorSearchRequest
-            start = time.time()
-            search_req = VectorSearchRequest(query="test", top_k=1)
-            await orchestrator.search_vectors(token, search_req)
-            results.sample_query_ok = True
-            results.latency_ms = int((time.time() - start) * 1000)
-        except Exception as e:
-            logger.debug("Sample query failed during token test: %s", _safe_error_category(e))
-            results.error = f"Token valid but sample query failed: {_safe_error_category(e)}"
+        results.sample_sql_ok = "ext:sql" in token.scopes
+        results.latency_ms = int((time.time() - start) * 1000)
 
     return results
 
@@ -337,7 +329,7 @@ async def connectivity_generate_setup(
             records = svc.list_datasets()
             for r in records:
                 status_val = r.status.value if hasattr(r.status, "value") else str(r.status)
-                if status_val == "ready":
+                if status_val == "preview_ready":
                     datasets.append({
                         "id": r.id,
                         "name": r.original_filename,

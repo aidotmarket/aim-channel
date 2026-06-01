@@ -168,7 +168,7 @@ def test_sql_integration(tmp_path):
     # Mock get_dataset
     class MockRecord:
         id = "sql_test_123"
-        status = ProcessingStatus.READY
+        status = ProcessingStatus.PREVIEW_READY
         processed_path = parquet_path
         original_filename = "sql_test.csv"
         metadata = {"columns": [{"name": "id"}, {"name": "name"}, {"name": "value"}]}
@@ -213,7 +213,7 @@ def test_no_replacement_scan_leak(tmp_path):
 
     class MockRecord:
         id = "rs_test_1"
-        status = ProcessingStatus.READY
+        status = ProcessingStatus.PREVIEW_READY
         processed_path = parquet_path
         original_filename = "rs_test.csv"
         metadata = {"columns": [{"name": "id"}, {"name": "val"}]}

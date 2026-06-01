@@ -497,108 +497,15 @@ class DuckDBService:
         
         return "unknown"
 
-    def calculate_searchability_score(self, filepath: Path) -> Dict[str, Any]:
-        """
-        Calculate a searchability score (0-100) indicating how well the dataset can be searched.
-        Higher scores mean better semantic search potential.
-        """
-        profiles = self.get_column_profile(filepath)
-        
-        score = 0
-        max_score = 100
-        factors = []
-        
-        # Factor 1: Has text columns (30 points max)
-        text_columns = [p for p in profiles if p['semantic_type'] in ['text', 'email', 'url']]
-        text_score = min(30, len(text_columns) * 10)
-        score += text_score
-        factors.append({
-            "name": "text_columns",
-            "score": text_score,
-            "max": 30,
-            "detail": f"{len(text_columns)} searchable text columns"
-        })
-        
-        # Factor 2: Data completeness (25 points max)
-        avg_completeness = sum(100 - p['null_percentage'] for p in profiles) / len(profiles) if profiles else 0
-        completeness_score = round(avg_completeness * 0.25)
-        score += completeness_score
-        factors.append({
-            "name": "completeness",
-            "score": completeness_score,
-            "max": 25,
-            "detail": f"{round(avg_completeness)}% average completeness"
-        })
-        
-        # Factor 3: Column diversity (20 points max)
-        semantic_types = set(p['semantic_type'] for p in profiles)
-        diversity_score = min(20, len(semantic_types) * 4)
-        score += diversity_score
-        factors.append({
-            "name": "diversity",
-            "score": diversity_score,
-            "max": 20,
-            "detail": f"{len(semantic_types)} different data types"
-        })
-        
-        # Factor 4: Has identifiable columns (15 points max)
-        id_columns = [p for p in profiles if p['semantic_type'] == 'id' or p['is_potential_id']]
-        id_score = min(15, len(id_columns) * 5)
-        score += id_score
-        factors.append({
-            "name": "identifiers",
-            "score": id_score,
-            "max": 15,
-            "detail": f"{len(id_columns)} identifier columns"
-        })
-        
-        # Factor 5: Reasonable column count (10 points max)
-        col_count = len(profiles)
-        if 3 <= col_count <= 50:
-            col_score = 10
-        elif col_count < 3:
-            col_score = col_count * 3
-        else:
-            col_score = max(0, 10 - (col_count - 50) // 10)
-        score += col_score
-        factors.append({
-            "name": "column_count",
-            "score": col_score,
-            "max": 10,
-            "detail": f"{col_count} columns"
-        })
-        
-        # Determine grade
-        if score >= 80:
-            grade = "A"
-        elif score >= 60:
-            grade = "B"
-        elif score >= 40:
-            grade = "C"
-        elif score >= 20:
-            grade = "D"
-        else:
-            grade = "F"
-        
-        return {
-            "score": min(score, max_score),
-            "max_score": max_score,
-            "grade": grade,
-            "factors": factors,
-        }
-
     def get_enhanced_metadata(self, filepath: Path) -> Dict[str, Any]:
         """
-        Get comprehensive metadata including basic info, column profiles, and searchability.
+        Get comprehensive metadata including basic info and column profiles.
         """
         # Basic metadata
         basic = self.get_file_metadata(filepath)
         
         # Column profiles
         profiles = self.get_column_profile(filepath)
-        
-        # Searchability score
-        searchability = self.calculate_searchability_score(filepath)
         
         # Calculate estimated memory size (rough estimate)
         file_type = self.detect_file_type(filepath)
@@ -620,7 +527,6 @@ class DuckDBService:
         return {
             **basic,
             "column_profiles": profiles,
-            "searchability": searchability,
             "estimated_memory_bytes": estimated_memory_bytes,
             "estimated_memory_mb": round(estimated_memory_bytes / (1024 * 1024), 2),
         }

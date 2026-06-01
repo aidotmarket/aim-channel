@@ -208,8 +208,8 @@ class BatchService:
     def confirm_batch(self, batch_id: str, user_id: str) -> Dict[str, Any]:
         """Confirm all preview_ready datasets in a batch. Returns counts.
 
-        Race-condition fix: items still in UPLOADED/EXTRACTING get confirmed_at
-        stamped so that process_dataset_task auto-indexes after extraction.
+        Items still in UPLOADED/EXTRACTING get confirmed_at stamped; processing
+        now ends at PREVIEW_READY.
         """
         from app.core.database import get_session_context
 
@@ -228,7 +228,6 @@ class BatchService:
             now = datetime.now(timezone.utc)
             for row in rows:
                 if row.status == DatasetStatus.PREVIEW_READY.value:
-                    row.status = DatasetStatus.INDEXING.value
                     row.confirmed_at = now
                     row.confirmed_by = user_id
                     row.updated_at = now
@@ -238,41 +237,26 @@ class BatchService:
                     DatasetStatus.UPLOADED.value,
                     DatasetStatus.EXTRACTING.value,
                 ):
-                    # Still processing — stamp confirmed_at so the background
-                    # task auto-indexes when extraction completes.
+                    # Still processing — stamp confirmation metadata.
                     row.confirmed_at = now
                     row.confirmed_by = user_id
                     row.updated_at = now
                     session.add(row)
                     pending_confirm += 1
-                elif row.status in (
-                    DatasetStatus.INDEXING.value,
-                    DatasetStatus.READY.value,
-                ):
+                elif row.status == DatasetStatus.CANCELLED.value:
                     already += 1
                 elif row.status == DatasetStatus.ERROR.value:
                     skipped_error += 1
 
             session.commit()
 
-        # Gather IDs that need indexing
-        confirmed_ids = []
-        with get_session_context() as session:
-            stmt = (
-                select(DBDatasetRecord)
-                .where(DBDatasetRecord.batch_id == batch_id)
-                .where(DBDatasetRecord.status == DatasetStatus.INDEXING.value)
-            )
-            rows = session.exec(stmt).all()
-            confirmed_ids = [r.id for r in rows]
-
         return {
             "batch_id": batch_id,
             "confirmed": confirmed,
             "pending_confirm": pending_confirm,
-            "already_indexing_or_ready": already,
+            "already_confirmed_or_cancelled": already,
             "skipped_error": skipped_error,
-            "confirmed_ids": confirmed_ids,
+            "confirmed_ids": [],
         }
 
     def batch_belongs_to_user(self, batch_id: str, user_id: str) -> bool:

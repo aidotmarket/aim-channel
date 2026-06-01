@@ -154,41 +154,6 @@ class SystemCollector(BaseCollector):
         }
 
 
-class QdrantCollector(BaseCollector):
-    """Qdrant collection stats, point counts, index status."""
-    name = "qdrant"
-
-    async def collect(self) -> dict:
-        from qdrant_client import QdrantClient
-
-        client = QdrantClient(
-            host=settings.qdrant_host,
-            port=settings.qdrant_port,
-            timeout=5.0,
-        )
-        collections = client.get_collections()
-
-        col_stats = []
-        for col in collections.collections:
-            info = client.get_collection(col.name)
-            col_stats.append({
-                "name": col.name,
-                "vectors_count": info.vectors_count,
-                "points_count": info.points_count,
-                "status": info.status.value if info.status else "unknown",
-                "config": {
-                    "vector_size": info.config.params.vectors.size
-                    if hasattr(info.config.params.vectors, "size")
-                    else None,
-                },
-            })
-
-        return {
-            "collection_count": len(col_stats),
-            "collections": col_stats,
-        }
-
-
 class DatabaseCollector(BaseCollector):
     """Alembic version + table row counts."""
     name = "database"
@@ -397,7 +362,6 @@ def get_default_collectors() -> list[BaseCollector]:
         ConfigCollector(),
         LogCollector(),
         SystemCollector(),
-        QdrantCollector(),
         DatabaseCollector(),
         ErrorCollector(),
         IssueCollector(),

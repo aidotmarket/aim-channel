@@ -22,10 +22,8 @@ class DatasetStatus(str, Enum):
     """Dataset lifecycle states (BQ-108+109)."""
     UPLOADED = "uploaded"            # File saved, extraction not started
     EXTRACTING = "extracting"       # Text/metadata extraction running
-    PREVIEW_READY = "preview_ready" # Extraction done, awaiting user confirm
-    INDEXING = "indexing"            # Chunking + embedding + Qdrant storage
-    READY = "ready"                 # Fully indexed and searchable
-    CANCELLED = "cancelled"         # User cancelled before indexing
+    PREVIEW_READY = "preview_ready" # Extraction/profile done, ready to list/publish
+    CANCELLED = "cancelled"         # User cancelled before processing finished
     ERROR = "error"                 # Any stage failed
 
 

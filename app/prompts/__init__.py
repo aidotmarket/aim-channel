@@ -1,4 +1,1 @@
-"""
-Prompt templates for vectorAIz RAG.
-Templates are stored in templates/ subdirectory.
-"""
+"""Prompt helpers for AIM Data."""

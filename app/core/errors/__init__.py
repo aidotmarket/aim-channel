@@ -7,7 +7,7 @@ will produce a structured JSON response.
 
 Usage:
     from app.core.errors import VectorAIzError
-    raise VectorAIzError("VAI-QDR-001", detail="connection refused to localhost:6333")
+    raise VectorAIzError("VAI-DB-001", detail="database unavailable")
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ class VectorAIzError(Exception):
     """Structured application error tied to the error registry.
 
     Args:
-        code: Registry error code, e.g. "VAI-QDR-001".
+        code: Registry error code, e.g. "VAI-DB-001".
         detail: Internal-only detail message (never exposed to users).
         context: Arbitrary key-value context for structured logging.
     """

@@ -15,7 +15,7 @@ from app.core.errors import CODE_PATTERN
 
 logger = logging.getLogger(__name__)
 
-VALID_DOMAINS = {"API", "CFG", "DB", "QDR", "LLM", "ING", "EMB", "RAG", "COP", "SEC", "SYS", "UX"}
+VALID_DOMAINS = {"API", "CFG", "DB", "LLM", "ING", "COP", "SEC", "SYS", "UX"}
 VALID_SEVERITIES = {"DEBUG", "INFO", "WARN", "ERROR", "CRITICAL"}
 REQUIRED_FIELDS = {"code", "domain", "title", "severity", "retryable", "user_action_required", "http_status", "safe_message", "remediation"}
 

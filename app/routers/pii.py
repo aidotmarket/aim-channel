@@ -97,7 +97,7 @@ async def scan_dataset(
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
     
-    if record.status != ProcessingStatus.READY:
+    if record.status != ProcessingStatus.PREVIEW_READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}"
@@ -327,7 +327,7 @@ async def scrub_dataset(
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
     
-    if record.status != ProcessingStatus.READY:
+    if record.status != ProcessingStatus.PREVIEW_READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}"

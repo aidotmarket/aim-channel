@@ -70,7 +70,7 @@ def sample_dataset(sample_file, tmp_data_dir):
         storage_filename="ds_test123_data.csv",
         file_type="csv",
         file_size_bytes=CHUNK_SIZE * 2,
-        status="ready",
+        status="preview_ready",
         listing_id="listing-abc-123",
     )
     with get_session_context() as session:
@@ -138,7 +138,7 @@ def _create_s3_backed_dataset(
         storage_filename=f"{dataset_id}.csv",
         file_type="csv",
         file_size_bytes=0,
-        status="ready",
+        status="preview_ready",
         listing_id=listing_id,
     )
     connection = S3Connection(
@@ -311,7 +311,7 @@ class TestFileNotFoundOnDisk:
             storage_filename="ds_ghost_gone.csv",
             file_type="csv",
             file_size_bytes=1000,
-            status="ready",
+            status="preview_ready",
             listing_id="listing-ghost-456",
         )
         with get_session_context() as session:
@@ -353,7 +353,7 @@ class TestFileSizeCap:
             storage_filename="ds_big_huge.csv",
             file_type="csv",
             file_size_bytes=600 * 1024 * 1024,
-            status="ready",
+            status="preview_ready",
             listing_id="listing-big-789",
         )
         with get_session_context() as session:
@@ -463,7 +463,7 @@ class TestQueuedFulfillments:
             storage_filename="ds_valid_ok.csv",
             file_type="csv",
             file_size_bytes=CHUNK_SIZE,
-            status="ready",
+            status="preview_ready",
             listing_id="listing-valid-001",
         )
         with get_session_context() as session:
@@ -501,7 +501,7 @@ class TestQueuedFulfillments:
             storage_filename="ds_multi_multi.csv",
             file_type="csv",
             file_size_bytes=CHUNK_SIZE,
-            status="ready",
+            status="preview_ready",
             listing_id="listing-multi-002",
         )
         with get_session_context() as session:
@@ -751,7 +751,7 @@ class TestACKBackpressure:
             storage_filename="ds_ack_test_ackfile.csv",
             file_type="csv",
             file_size_bytes=CHUNK_SIZE * 6,
-            status="ready",
+            status="preview_ready",
             listing_id="listing-ack-test",
         )
         with get_session_context() as session:
@@ -818,7 +818,7 @@ class TestACKValidation:
             storage_filename="ds_ackval_ackval.csv",
             file_type="csv",
             file_size_bytes=CHUNK_SIZE * 6,
-            status="ready",
+            status="preview_ready",
             listing_id="listing-ackval",
         )
         with get_session_context() as session:
@@ -869,7 +869,7 @@ class TestDoubleACKTimeout:
             storage_filename="ds_dblack_dblack.csv",
             file_type="csv",
             file_size_bytes=CHUNK_SIZE * 6,
-            status="ready",
+            status="preview_ready",
             listing_id="listing-dblack",
         )
         with get_session_context() as session:
@@ -939,7 +939,7 @@ class TestACKWindowResend:
             storage_filename="ds_resend_resend.csv",
             file_type="csv",
             file_size_bytes=CHUNK_SIZE * 6,
-            status="ready",
+            status="preview_ready",
             listing_id="listing-resend",
         )
         with get_session_context() as session:
@@ -1015,7 +1015,7 @@ class TestACKWindowResend:
             storage_filename="ds_dblresend_dblresend.csv",
             file_type="csv",
             file_size_bytes=CHUNK_SIZE * 6,
-            status="ready",
+            status="preview_ready",
             listing_id="listing-dblresend",
         )
         with get_session_context() as session:
@@ -1081,7 +1081,7 @@ class TestQueueRaceRegression:
                 storage_filename=f"ds_{ds_id}_{ds_id}.csv",
                 file_type="csv",
                 file_size_bytes=CHUNK_SIZE,
-                status="ready",
+                status="preview_ready",
                 listing_id=listing,
             )
             with get_session_context() as session:

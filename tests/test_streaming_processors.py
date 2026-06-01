@@ -526,75 +526,6 @@ class TestProcessWorkerSerialization:
 
 
 # ---------------------------------------------------------------------------
-# Indexing service streaming tests (R5)
-# ---------------------------------------------------------------------------
-
-
-class TestIndexStreaming:
-    """Test chunked streaming indexing (R5)."""
-
-    def test_detect_text_columns_from_rows(self):
-        from app.services.indexing_service import IndexingService
-
-        # Mock the dependencies
-        with patch("app.services.indexing_service.get_embedding_service"), \
-             patch("app.services.indexing_service.get_qdrant_service"):
-            service = IndexingService()
-
-            row = {
-                "id": 1,
-                "name": "Test Product",
-                "description": "A very long description that has more than 10 characters",
-                "price": 29.99,
-                "short": "hi",
-            }
-            cols = service._detect_text_columns_from_rows(row)
-            # "name" matches keyword, "description" matches keyword + length
-            assert "name" in cols
-            assert "description" in cols
-            # "short" is too short and no keyword match
-            assert "short" not in cols
-
-    def test_stable_point_ids(self):
-        """R5: Verify stable point IDs are deterministic UUID5 values."""
-        from app.services.indexing_service import IndexingService
-
-        with patch("app.services.indexing_service.get_embedding_service") as mock_embed, \
-             patch("app.services.indexing_service.get_qdrant_service") as mock_qdrant:
-
-            mock_embed_svc = MagicMock()
-            mock_embed_svc.embed_texts.return_value = [[0.1] * 384]  # dummy embeddings
-            mock_embed.return_value = mock_embed_svc
-
-            mock_qdrant_svc = MagicMock()
-            mock_qdrant_svc.upsert_vectors.return_value = {"upserted": 1}
-            mock_qdrant.return_value = mock_qdrant_svc
-
-            service = IndexingService()
-
-            # Create a simple chunk iterator
-            batch = pa.RecordBatch.from_pydict({
-                "name": ["Test Item"],
-                "description": ["A description that is long enough to be text"],
-            })
-
-            result = service.index_streaming(
-                dataset_id="abc123",
-                chunk_iterator=[batch],
-            )
-
-            assert result["status"] == "completed"
-            assert result["rows_indexed"] == 1
-
-            # Verify the payload had the correct point ID format
-            call_args = mock_qdrant_svc.upsert_vectors.call_args
-            payloads = call_args[1]["payloads"] if "payloads" in call_args[1] else call_args[0][2]
-            import uuid as _uuid
-            expected_id = str(_uuid.uuid5(_uuid.NAMESPACE_OID, "abc123:0:0"))
-            assert payloads[0]["row_id"] == expected_id
-
-
-# ---------------------------------------------------------------------------
 # TextBlock dataclass tests
 # ---------------------------------------------------------------------------
 
@@ -765,43 +696,6 @@ class TestCancelEscalation:
         calls = [c[0] for c in mock_kill.call_args_list]
         assert (99998, signal.SIGTERM) in calls
         assert (99998, signal.SIGKILL) in calls
-
-
-# ---------------------------------------------------------------------------
-# B5: Point IDs passed as Qdrant IDs (Gate 3)
-# ---------------------------------------------------------------------------
-
-
-class TestPointIDsAsQdrantIDs:
-    """B5: Verify _flush_index_batch passes row_id as Qdrant point IDs."""
-
-    def test_flush_passes_ids_to_upsert(self):
-        from app.services.indexing_service import IndexingService
-
-        with patch("app.services.indexing_service.get_embedding_service") as mock_embed, \
-             patch("app.services.indexing_service.get_qdrant_service") as mock_qdrant:
-
-            mock_embed_svc = MagicMock()
-            mock_embed_svc.embed_texts.return_value = [[0.1] * 384, [0.2] * 384]
-            mock_embed.return_value = mock_embed_svc
-
-            mock_qdrant_svc = MagicMock()
-            mock_qdrant_svc.upsert_vectors.return_value = {"upserted": 2}
-            mock_qdrant.return_value = mock_qdrant_svc
-
-            service = IndexingService()
-
-            import uuid as _uuid
-            id_0 = str(_uuid.uuid5(_uuid.NAMESPACE_OID, "ds1:0:0"))
-            id_1 = str(_uuid.uuid5(_uuid.NAMESPACE_OID, "ds1:0:1"))
-            payloads = [
-                {"row_id": id_0, "text_content": "hello"},
-                {"row_id": id_1, "text_content": "world"},
-            ]
-            service._flush_index_batch("coll_test", ["hello", "world"], payloads)
-
-            call_kwargs = mock_qdrant_svc.upsert_vectors.call_args[1]
-            assert call_kwargs["ids"] == [id_0, id_1]
 
 
 # ---------------------------------------------------------------------------

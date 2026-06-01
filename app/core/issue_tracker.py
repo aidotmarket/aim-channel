@@ -51,7 +51,7 @@ class IssueTracker:
     def record(self, code: str, component: str | None = None) -> None:
         """Record an issue occurrence."""
         if component is None:
-            # Derive component from code domain: VAI-QDR-001 → qdrant
+            # Derive component from code domain: VAI-DB-001 → db
             parts = code.split("-")
             component = parts[1].lower() if len(parts) >= 3 else "unknown"
 

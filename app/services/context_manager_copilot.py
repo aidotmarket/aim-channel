@@ -8,7 +8,7 @@ Called on every BRAIN_MESSAGE before prompt assembly.
 Aggregates:
 - StateSnapshot (last received from frontend via WS)
 - User preferences (tone mode, quiet mode from session/env)
-- System state (LLM config, Qdrant health, connected mode)
+- System state (LLM config, connected mode)
 - Dataset metadata (if active dataset in snapshot)
 - Recent events (from event log — placeholder for Phase 3)
 
@@ -82,7 +82,7 @@ class CoPilotContextManager:
         Assemble AllieContext from:
         - StateSnapshot (last received from frontend via WS)
         - User preferences (tone mode, quiet mode)
-        - System state (LLM config, Qdrant health, etc.)
+        - System state (LLM config, deployment mode, etc.)
         - Session metadata (has_seen_intro, etc.)
 
         Returns a fully populated AllieContext ready for PromptFactory.
@@ -107,8 +107,6 @@ class CoPilotContextManager:
 
         # System state
         connected_mode = not is_local_only()
-        vectorization_enabled = _check_vectorization_enabled()
-        qdrant_status = _check_qdrant_status()
         local_only = is_local_only()
 
         # Dataset list: prefer frontend-provided summary, fallback to DB
@@ -154,8 +152,6 @@ class CoPilotContextManager:
             dataset_list=dataset_list,
             full_schema_graph=full_schema_graph,
             connected_mode=connected_mode,
-            vectorization_enabled=vectorization_enabled,
-            qdrant_status=qdrant_status,
             capabilities=capabilities,
             recent_events=[],  # Populated in Phase 3 (proactive triggers)
             triggers={},  # Populated in Phase 3
@@ -313,7 +309,7 @@ class CoPilotContextManager:
     def _is_queryable_dataset(record: Any) -> bool:
         """Return True when the dataset can be queried as a DuckDB view."""
         status = record.status.value if hasattr(record.status, "value") else str(record.status)
-        return status == "ready" and bool(record.processed_path)
+        return status == "preview_ready" and bool(record.processed_path)
 
     @staticmethod
     def _build_table_schema(record: Any) -> Dict[str, Any]:
@@ -502,17 +498,6 @@ class CoPilotContextManager:
         if token.endswith("s") and not token.endswith("ss") and len(token) > 3:
             return token[:-1]
         return token
-
-
-def _check_vectorization_enabled() -> bool:
-    """Check if vectorization is enabled in this deployment."""
-    return os.environ.get("VECTORAIZ_VECTORIZATION_ENABLED", "true").lower() == "true"
-
-
-def _check_qdrant_status() -> str:
-    """Check Qdrant status. Placeholder — real health check in Phase 3."""
-    return os.environ.get("VECTORAIZ_QDRANT_STATUS", "healthy")
-
 
 
 # Module-level singleton

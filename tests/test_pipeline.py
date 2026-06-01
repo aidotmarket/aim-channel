@@ -168,7 +168,7 @@ class TestCSVPipeline:
                 "size_bytes": sample_csv.stat().st_size,
                 "created_at": "2024-01-01T00:00:00",
                 "modified_at": "2024-01-01T00:00:00",
-                "status": "ready",
+                "status": "preview_ready",
             }
         )
 
@@ -268,7 +268,7 @@ class TestCanonicalStatusField:
                 "size_bytes": sample_csv.stat().st_size,
                 "created_at": "2024-01-01T00:00:00",
                 "modified_at": "2024-01-01T00:00:00",
-                "status": "ready",
+                "status": "preview_ready",
             }
         )
 

@@ -176,10 +176,6 @@ class Settings(BaseSettings):
     raw_file_import_directory: str = "/data/import"
     raw_file_upload_max_size_mb: int = 500
     
-    # Qdrant settings
-    qdrant_host: str = "qdrant"
-    qdrant_port: int = 6333
-    
     # Document processing (optional premium)
     unstructured_api_key: Optional[str] = None
 
@@ -214,7 +210,7 @@ class Settings(BaseSettings):
     large_file_threshold_mb: int = 50             # Files above this use streaming path
     fallback_max_size_mb: int = 200              # Max file size (MB) for in-memory fallback on streaming failure
     process_worker_memory_limit_mb: int = _DETECTED_WORKER_MEM  # Per-worker memory cap (auto-detected)
-    process_worker_timeout_s: int = 300          # 5 min per file (indexing path doubles to 10 min)
+    process_worker_timeout_s: int = 300          # 5 min per file
     process_worker_grace_period_s: int = 60      # Seconds for checkpoint flush after SIGTERM
     process_worker_max_concurrent: int = _DETECTED_CPU_WORKERS  # Max parallel workers (auto-detected)
     duckdb_memory_limit_mb: int = _DETECTED_DUCKDB_MEM  # DuckDB in-memory budget (auto-detected)
@@ -236,12 +232,6 @@ class Settings(BaseSettings):
     app_version: str = os.environ.get("VECTORAIZ_VERSION", "dev")
     serial_data_dir: str = "/data"  # Directory for serial.json + pending_usage.jsonl
 
-    # BQ-VZ-HYBRID-SEARCH Phase 1A: Hybrid search pipeline config
-    hybrid_search_mode: Literal["hybrid", "dense_only"] = "hybrid"
-    hybrid_rrf_k: int = 60
-    reranker_enabled: bool = True
-    reranker_top_k: int = 30
-    reranker_timeout_ms: int = 200
     fts_enabled: bool = True
 
     # CORS
@@ -250,6 +240,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_prefix = "VECTORAIZ_"
+        extra = "ignore"
 
     @field_validator("ai_market_aws_account_id")
     @classmethod

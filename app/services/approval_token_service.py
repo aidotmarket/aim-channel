@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 READ_ONLY_TOOLS = {
     "list_datasets", "get_dataset_detail", "preview_rows",
-    "run_sql_query", "search_vectors", "get_system_status",
+    "run_sql_query", "get_system_status",
     "get_dataset_statistics", "connectivity_status",
     "get_notifications", "get_tunnel_status",
     "generate_diagnostic_bundle",
@@ -82,7 +82,6 @@ TOOL_CAPABILITIES: Dict[str, set] = {
     "get_dataset_detail": {"data:read"},
     "preview_rows": {"data:read"},
     "run_sql_query": {"data:read"},
-    "search_vectors": {"data:read"},
     "get_system_status": {"system:read"},
     "get_dataset_statistics": {"data:read"},
     "connectivity_status": {"connectivity:read"},

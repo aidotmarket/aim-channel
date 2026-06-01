@@ -346,7 +346,6 @@ class AllAIToolExecutor:
             "get_dataset_detail": self._handle_get_dataset_detail,
             "preview_rows": self._handle_preview_rows,
             "run_sql_query": self._handle_run_sql_query,
-            "search_vectors": self._handle_search_vectors,
             "get_system_status": self._handle_get_system_status,
             "get_dataset_statistics": self._handle_get_dataset_statistics,
             # BQ-MCP-RAG Phase 2: Connectivity tools
@@ -587,56 +586,6 @@ class AllAIToolExecutor:
             ),
         )
 
-    async def _handle_search_vectors(self, tool_input: dict) -> ToolResult:
-        """Semantic search across vectorized datasets."""
-        from app.services.search_service import get_search_service
-        search_svc = get_search_service()
-
-        query = tool_input["query"]
-        dataset_id = tool_input.get("dataset_id")
-        limit = min(tool_input.get("limit", 5), 20)
-
-        try:
-            result = search_svc.search(
-                query=query,
-                dataset_id=dataset_id,
-                limit=limit,
-            )
-        except ValueError as e:
-            return ToolResult(
-                frontend_data={"error": str(e)},
-                llm_summary=f"Search failed: {str(e)[:200]}",
-            )
-
-        results = result.get("results", [])
-
-        # BQ-FEEDBACK: Fire first_search feedback nudge (30s delay, max 1/session)
-        if results:
-            asyncio.get_event_loop().create_task(
-                self._fire_delayed_nudge("first_search", delay_s=30)
-            )
-
-        return ToolResult(
-            frontend_data={
-                "query": query,
-                "results": results,
-                "total": len(results),
-                "datasets_searched": result.get("datasets_searched", 0),
-            },
-            llm_summary=(
-                f"Semantic search for '{query}' returned {len(results)} result(s) "
-                f"across {result.get('datasets_searched', 0)} dataset(s). "
-                + (
-                    "Top matches: " + "; ".join(
-                        f"score={r['score']:.2f} from '{r.get('dataset_name', '?')}'"
-                        for r in results[:5]
-                    )
-                    if results else "No matching results."
-                )
-                + " Results displayed to user."
-            ),
-        )
-
     async def _handle_get_system_status(self, _tool_input: dict) -> ToolResult:
         """Get system health status."""
         from app.core.local_only_guard import is_local_only
@@ -654,16 +603,6 @@ class AllAIToolExecutor:
         except Exception as e:
             status["duckdb"] = f"error: {str(e)[:100]}"
 
-        # Check Qdrant
-        try:
-            from app.services.qdrant_service import get_qdrant_service
-            qdrant_svc = get_qdrant_service()
-            collections = qdrant_svc.list_collections()
-            status["qdrant"] = "healthy"
-            status["qdrant_collections"] = len(collections)
-        except Exception as e:
-            status["qdrant"] = f"error: {str(e)[:100]}"
-
         # Check datasets
         try:
             from app.services.processing_service import get_processing_service
@@ -672,7 +611,7 @@ class AllAIToolExecutor:
             status["datasets_total"] = len(datasets)
             status["datasets_ready"] = sum(
                 1 for d in datasets
-                if (d.status.value if hasattr(d.status, "value") else str(d.status)) == "ready"
+                if (d.status.value if hasattr(d.status, "value") else str(d.status)) == "preview_ready"
             )
         except Exception as e:
             status["datasets_total"] = f"error: {str(e)[:100]}"
@@ -682,9 +621,8 @@ class AllAIToolExecutor:
             llm_summary=(
                 f"System status: mode={status.get('mode')}, "
                 f"DuckDB={status.get('duckdb', 'unknown')}, "
-                f"Qdrant={status.get('qdrant', 'unknown')}, "
                 f"datasets={status.get('datasets_total', '?')} "
-                f"(ready: {status.get('datasets_ready', '?')})."
+                f"(processed: {status.get('datasets_ready', '?')})."
             ),
         )
 
@@ -975,7 +913,7 @@ class AllAIToolExecutor:
                 records = svc.list_datasets()
                 for r in records:
                     status_val = r.status.value if hasattr(r.status, "value") else str(r.status)
-                    if status_val == "ready":
+                    if status_val == "preview_ready":
                         datasets.append({
                             "id": r.id,
                             "name": r.original_filename,
@@ -1026,7 +964,7 @@ class AllAIToolExecutor:
             "token_scopes": [],
             "mcp_responding": False,
             "datasets_accessible": 0,
-            "sample_query_ok": False,
+            "sample_sql_ok": False,
             "latency_ms": None,
         }
 
@@ -1066,25 +1004,17 @@ class AllAIToolExecutor:
             logger.error("Connectivity test: dataset listing failed", exc_info=True)
             results["datasets_error"] = _safe_error_category(e)
 
-        # 4. Run sample query if datasets available
+        # 4. External connectivity is SQL/profile/schema only after vector removal.
         if results["datasets_accessible"] > 0:
-            try:
-                from app.models.connectivity import VectorSearchRequest
-                start = time.time()
-                search_req = VectorSearchRequest(query="test", top_k=1)
-                await orchestrator.search_vectors(token, search_req)
-                results["sample_query_ok"] = True
-                results["latency_ms"] = int((time.time() - start) * 1000)
-            except Exception as e:
-                logger.error("Connectivity test: sample query failed", exc_info=True)
-                results["sample_query_error"] = _safe_error_category(e)
+            results["sample_sql_ok"] = "ext:sql" in token.scopes
+            results["latency_ms"] = int((time.time() - start) * 1000)
 
         # Build summary
         checks = [
             f"Connectivity: {'enabled' if results['connectivity_enabled'] else 'DISABLED'}",
             f"Token: {'valid' if results['token_valid'] else 'INVALID'} ({results.get('token_label', '?')})",
             f"Datasets accessible: {results['datasets_accessible']}",
-            f"Sample query: {'OK' if results['sample_query_ok'] else 'skipped/failed'}",
+            f"SQL access: {'available' if results['sample_sql_ok'] else 'not scoped'}",
         ]
         if results.get("latency_ms") is not None:
             checks.append(f"Latency: {results['latency_ms']}ms")
@@ -1327,7 +1257,6 @@ class AllAIToolExecutor:
                     "health",
                     "config",
                     "system",
-                    "qdrant",
                     "db",
                     "errors",
                     "logs",
@@ -1336,7 +1265,7 @@ class AllAIToolExecutor:
             },
             llm_summary=(
                 f"Diagnostic bundle generated ({bundle_size_kb} KB). "
-                "Contains: health, config, system, qdrant, db, errors, logs. "
+                "Contains: health, config, system, db, errors, logs. "
                 "Tell the user they can download it from the Settings → Diagnostics page."
             ),
         )
@@ -1363,7 +1292,6 @@ class AllAIToolExecutor:
             "health snapshot",
             "redacted config",
             "system info",
-            "qdrant status",
             "database schema",
             "error registry",
             "recent logs (redacted)",
@@ -1400,7 +1328,7 @@ class AllAIToolExecutor:
             },
             llm_summary=(
                 f"Diagnostic support bundle prepared ({bundle_size_kb} KB). "
-                "Contains: health, config, system, qdrant, db, errors, logs (all PII-scrubbed). "
+                "Contains: health, config, system, db, errors, logs (all PII-scrubbed). "
                 "An action_required notification has been created. The user needs to click "
                 "'Send to Support' in their notifications to transmit the bundle to ai.market. "
                 "Tell the user to check their notifications (bell icon) to approve sending."

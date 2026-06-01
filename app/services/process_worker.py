@@ -43,7 +43,7 @@ def _release_memory():
     """Force Python to return freed memory pages to OS.
 
     CPython's allocator holds freed pages indefinitely, causing RSS to
-    ratchet upward during long-running loops (e.g. indexing millions of rows).
+    ratchet upward during long-running loops.
     gc.collect() frees unreachable objects, then malloc_trim() returns
     the freed pages to the kernel.
     """
@@ -424,92 +424,6 @@ def run_document_worker(
         log_mem_state("Worker Exit:document")
 
 
-def run_indexing_worker(
-    dataset_id: str,
-    parquet_path: str,
-    progress_conn: Connection,
-    control_conn: Connection,
-    memory_limit_mb: int,
-) -> None:
-    """Subprocess entry point for streaming indexing vectors to Qdrant.
-    
-    Reads from the Parquet file and indices batches via IndexingService.
-    Sends progress updates back to the parent and handles cancellation.
-    """
-    try:
-        _set_memory_limit(memory_limit_mb)
-        log_mem_state("Worker Start:indexing")
-
-        import pyarrow.parquet as pq
-        from app.config import settings
-        from app.services.indexing_service import get_indexing_service
-
-        # Path validation: prevent traversal and symlink attacks
-        fp = Path(parquet_path).resolve()
-        processed_dir = Path(settings.processed_directory).resolve()
-        if not str(fp).startswith(str(processed_dir)):
-            raise ValueError(f"Path traversal detected: {parquet_path} resolves outside {processed_dir}")
-        if fp.is_symlink():
-            raise ValueError(f"Symlink detected: {parquet_path}")
-        if not fp.exists() or not fp.is_file():
-            raise ValueError(f"Not a regular file: {parquet_path}")
-
-
-        indexing_service = get_indexing_service()
-        pf = pq.ParquetFile(parquet_path)
-        total_rows = pf.metadata.num_rows if pf.metadata else 0
-        chunk_iter = pf.iter_batches(batch_size=1000)
-
-        _rows_logged = [0]  # mutable counter for periodic mem snapshots
-
-        def _indexing_progress(rows_done: int) -> None:
-            # Check for cancel signal from parent
-            if control_conn.poll(0):
-                msg = control_conn.recv()
-                if msg == "cancel":
-                    raise InterruptedError("cancelled")
-
-            # Periodic memory snapshot every 5000 rows
-            if rows_done - _rows_logged[0] >= 5000:
-                log_mem_state(f"indexing_rows_{rows_done}")
-                _rows_logged[0] = rows_done
-                _release_memory()  # Periodic OS page release
-
-            pct = min((rows_done / max(total_rows, 1)) * 100, 99) if total_rows else 50
-            _safe_progress_send(progress_conn, {
-                "status": "processing",
-                "phase": "indexing",
-                "rows_done": rows_done,
-                "total_rows": total_rows,
-                "pct": pct
-            })
-
-        result = indexing_service.index_streaming(
-            dataset_id=dataset_id,
-            chunk_iterator=chunk_iter,
-            recreate_collection=True,
-            progress_callback=_indexing_progress,
-        )
-
-        _safe_progress_send(progress_conn, {
-            "status": "completed",
-            "result": result
-        })
-
-    except Exception as e:
-        status = "cancelled" if isinstance(e, InterruptedError) else "error"
-        logger.error(f"Indexing worker failed: {e}")
-        _safe_progress_send(progress_conn, {
-            "status": status,
-            "error": str(e),
-            "traceback": _traceback_mod.format_exc()
-        })
-        if status == "error":
-            sys.exit(1)
-    finally:
-        log_mem_state("Worker Exit:indexing")
-
-
 # ---------------------------------------------------------------------------
 # Parent-side: ProcessWorkerManager
 # ---------------------------------------------------------------------------
@@ -623,52 +537,6 @@ class ProcessWorkerManager:
             progress_conn=progress_parent,
             control_conn=control_child,    # write end for send
             timeout_s=settings.process_worker_timeout_s,
-            grace_period_s=settings.process_worker_grace_period_s,
-            memory_monitor=mem_monitor,
-            semaphore=self._semaphore,
-            manager=self,
-        )
-
-    def submit_indexing(
-        self,
-        dataset_id: str,
-        parquet_path: Path,
-    ) -> WorkerHandle:
-        """Submit an indexing job for streaming processing in a subprocess."""
-        from app.config import settings
-
-        self._semaphore.acquire()
-
-        data_queue = _mp_ctx.Queue(maxsize=1) # Unused for indexing, but matching handle signature
-        progress_parent, progress_child = _mp_ctx.Pipe(duplex=False)
-        control_parent, control_child = _mp_ctx.Pipe(duplex=False)
-
-        proc = _mp_ctx.Process(
-            target=run_indexing_worker,
-            args=(
-                dataset_id,
-                str(parquet_path),
-                progress_child,
-                control_parent,   # read end for poll/recv
-                settings.process_worker_memory_limit_mb,
-            ),
-            daemon=True,
-        )
-        proc.start()
-        self._active_processes.append(proc)
-
-        mem_monitor = MemoryMonitor(
-            pid=proc.pid,
-            limit_mb=settings.process_worker_memory_limit_mb,
-        )
-        mem_monitor.start()
-
-        return WorkerHandle(
-            future=proc,
-            data_queue=data_queue,
-            progress_conn=progress_parent,
-            control_conn=control_child,    # write end for send
-            timeout_s=settings.process_worker_timeout_s * 2, # Indexing takes longer generally
             grace_period_s=settings.process_worker_grace_period_s,
             memory_monitor=mem_monitor,
             semaphore=self._semaphore,

@@ -51,7 +51,7 @@ def test_aim_data_compose_uses_standard_vectoraiz_image_and_env():
         "${HOST_IMPORT_DIR:-./import}:/data/import:ro",
         "/var/run/docker.sock:/var/run/docker.sock",
     ]
-    assert set(service["depends_on"]) == {"postgres", "qdrant"}
+    assert set(service["depends_on"]) == {"postgres"}
 
 
 def test_no_runtime_aim_data_mode_or_marketplace_enabled_refs_remain():

@@ -58,9 +58,9 @@ API_VERSION = os.environ.get("VECTORAIZ_VERSION", "dev")
 
 # BQ-127 (§7): Mode-aware API descriptions
 API_DESCRIPTION_STANDALONE = """
-## vectorAIz - Data Processing & Semantic Search
+## AIM Data - Data Processing
 
-Upload, process, vectorize, and search your data using your own LLM.
+Upload, process, profile, and publish your data.
 Runs entirely on your infrastructure with no internet required.
 
 ### Quick Start
@@ -68,7 +68,7 @@ Runs entirely on your infrastructure with no internet required.
 2. Complete the setup wizard (create admin account)
 3. Upload data files
 4. Configure your LLM provider (Settings > LLM)
-5. Search and query your data
+5. Query your processed data with SQL
 
 ### Authentication
 
@@ -83,7 +83,7 @@ Set VECTORAIZ_MODE=connected to enable ai.market integration:
 """
 
 API_DESCRIPTION_CONNECTED = """
-## vectorAIz - Data Processing & Semantic Search (Connected)
+## AIM Data - Data Processing (Connected)
 
 Full-featured mode with ai.market integration for premium features,
 billing, and marketplace access.
@@ -636,14 +636,6 @@ def create_app() -> FastAPI:
         logger.info("Connected mode: premium routers mounted (billing, integrations, webhooks)")
     else:
         logger.info("Standalone mode: premium routers NOT mounted")
-
-    # PUBLIC — website chat widget (no auth)
-    from app.routers.website_chat import router as website_chat_router
-    app.include_router(
-        website_chat_router,
-        prefix="/api/website-chat",
-        tags=["website-chat"],
-    )
 
     # ADMIN ONLY — connectivity management (Settings UI)
     from app.routers.connectivity_mgmt import router as connectivity_mgmt_router

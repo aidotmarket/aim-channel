@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 def auto_detect_concurrency() -> int:
     """Detect optimal processing queue concurrency from CPU and memory.
 
-    - Reserve 1.5 GB for the base system (API server, Postgres, Qdrant, OS).
-    - Each processing worker needs ~500 MB (embedding model + DuckDB + buffers).
+    - Reserve 1.5 GB for the base system (API server, Postgres, OS).
+    - Each processing worker needs ~500 MB (DuckDB + buffers).
     - Hard cap at 8, floor at 1.
     - ``VECTORAIZ_MAX_CONCURRENT_PROCESSING`` env var overrides when set.
     """
@@ -118,8 +118,6 @@ def _friendly_error(exc: Exception) -> str:
 @dataclass
 class _QueueItem:
     dataset_id: str
-    skip_indexing: bool = False
-    index_only: bool = False
     submitted_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -137,21 +135,12 @@ class ProcessingQueue:
     async def submit(
         self,
         dataset_id: str,
-        skip_indexing: bool = False,
-        index_only: bool = False,
     ) -> int:
         """Enqueue a dataset for processing. Returns queue depth."""
-        item = _QueueItem(
-            dataset_id=dataset_id,
-            skip_indexing=skip_indexing,
-            index_only=index_only,
-        )
+        item = _QueueItem(dataset_id=dataset_id)
         await self._queue.put(item)
         depth = self._queue.qsize()
-        logger.info(
-            "Queued %s (queue_depth=%d, skip_indexing=%s, index_only=%s)",
-            dataset_id, depth, skip_indexing, index_only,
-        )
+        logger.info("Queued %s (queue_depth=%d)", dataset_id, depth)
         self.update_progress(dataset_id, "queued", 0, f"Queue position #{depth}")
         return depth
 
@@ -206,16 +195,8 @@ class ProcessingQueue:
             self.update_progress(item.dataset_id, "extracting", 0, "Starting…")
             async with self._semaphore:
                 try:
-                    if item.index_only:
-                        logger.info("Indexing dataset %s", item.dataset_id)
-                        self.update_progress(item.dataset_id, "indexing", 0, "Starting indexing…")
-                        await self._run_index(item.dataset_id)
-                    else:
-                        logger.info(
-                            "Processing dataset %s (skip_indexing=%s)",
-                            item.dataset_id, item.skip_indexing,
-                        )
-                        await self._run_process(item.dataset_id, item.skip_indexing)
+                    logger.info("Processing dataset %s", item.dataset_id)
+                    await self._run_process(item.dataset_id)
                     logger.info("Completed dataset %s", item.dataset_id)
                 except Exception as exc:
                     logger.exception("Failed dataset %s", item.dataset_id)
@@ -247,7 +228,7 @@ class ProcessingQueue:
                 return
             # Only override if not already in a terminal state
             status_val = rec.status.value if hasattr(rec.status, "value") else str(rec.status)
-            if status_val in ("error", "ready", "cancelled", "deleted"):
+            if status_val in ("error", "preview_ready", "cancelled", "deleted"):
                 return
             rec.status = DatasetStatus.ERROR
             rec.error = _friendly_error(exc)
@@ -257,48 +238,12 @@ class ProcessingQueue:
         except Exception:
             logger.exception("Failed to set ERROR status for %s", dataset_id)
 
-    async def _run_process(self, dataset_id: str, skip_indexing: bool):
-        """Process a dataset (extract + optionally index)."""
-        from app.services.processing_service import get_processing_service
-        from app.models.dataset import DatasetStatus
-
-        processing = get_processing_service()
-        await processing.process_file(dataset_id, skip_indexing=skip_indexing)
-
-        if not skip_indexing:
-            return
-
-        # Auto-index if batch was confirmed during extraction
-        from app.core.database import get_session_context
-        from app.models.dataset import DatasetRecord as DBDatasetRecord
-
-        should_index = False
-        with get_session_context() as session:
-            db_row = session.get(DBDatasetRecord, dataset_id)
-            if (
-                db_row
-                and db_row.confirmed_at
-                and db_row.status == DatasetStatus.PREVIEW_READY.value
-            ):
-                logger.info(
-                    "Auto-indexing dataset %s (batch confirmed during extraction)",
-                    dataset_id,
-                )
-                db_row.status = DatasetStatus.INDEXING.value
-                db_row.updated_at = datetime.now(timezone.utc)
-                session.add(db_row)
-                session.commit()
-                should_index = True
-
-        if should_index:
-            await self._run_index(dataset_id)
-
-    async def _run_index(self, dataset_id: str):
-        """Run index phase for a dataset."""
+    async def _run_process(self, dataset_id: str):
+        """Process a dataset through extraction/profiling."""
         from app.services.processing_service import get_processing_service
 
         processing = get_processing_service()
-        await processing.run_index_phase(dataset_id)
+        await processing.process_file(dataset_id)
 
     def start(self, wrapper=None) -> List[asyncio.Task]:
         """Start worker tasks matching auto-detected concurrency.

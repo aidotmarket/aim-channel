@@ -14,7 +14,6 @@ from app.mcp_server import (
     _validate_dataset_id,
     vectoraiz_list_datasets,
     vectoraiz_get_schema,
-    vectoraiz_search,
     vectoraiz_sql,
     vectoraiz_profile_dataset,
     vectoraiz_get_pii_report,
@@ -27,7 +26,6 @@ from app.models.connectivity import (
     ProfileResponse,
     ProfileColumnInfo,
     SchemaResponse,
-    SearchResponse,
     SQLResponse,
     SQLLimits,
     validate_dataset_id,
@@ -151,46 +149,6 @@ class TestGetSchema:
 
 
 # ---------------------------------------------------------------------------
-# Tool: search
-# ---------------------------------------------------------------------------
-
-class TestSearch:
-    @pytest.mark.asyncio
-    async def test_search_success(self, mock_orchestrator, mock_token):
-        import app.mcp_server as mcp_mod
-
-        mock_orchestrator.search_vectors = AsyncMock(
-            return_value=SearchResponse(
-                matches=[], count=0, truncated=False, request_id="ext-test"
-            )
-        )
-
-        with patch.object(mcp_mod, "_get_orchestrator", return_value=mock_orchestrator):
-            with patch.object(mcp_mod, "_validate_token", return_value=mock_token):
-                result = await vectoraiz_search("test query", top_k=5)
-                data = json.loads(result)
-                assert data["count"] == 0
-
-    @pytest.mark.asyncio
-    async def test_search_clamps_top_k(self, mock_orchestrator, mock_token):
-        import app.mcp_server as mcp_mod
-
-        mock_orchestrator.search_vectors = AsyncMock(
-            return_value=SearchResponse(
-                matches=[], count=0, truncated=False, request_id="ext-test"
-            )
-        )
-
-        with patch.object(mcp_mod, "_get_orchestrator", return_value=mock_orchestrator):
-            with patch.object(mcp_mod, "_validate_token", return_value=mock_token):
-                # top_k > 20 should be clamped
-                await vectoraiz_search("query", top_k=100)
-                call_args = mock_orchestrator.search_vectors.call_args
-                req = call_args[0][1]  # second positional arg
-                assert req.top_k == 20
-
-
-# ---------------------------------------------------------------------------
 # Tool: sql
 # ---------------------------------------------------------------------------
 
@@ -278,23 +236,6 @@ class TestErrorHardening:
                 error_data = json.loads(str(exc_info.value))
                 assert error_data["error"]["code"] == "internal_error"
                 assert "/secret/path" not in error_data["error"]["message"]
-
-    @pytest.mark.asyncio
-    async def test_search_hides_internal_error(self, mock_token):
-        import app.mcp_server as mcp_mod
-
-        mock_orch = MagicMock()
-        mock_orch.search_vectors = AsyncMock(
-            side_effect=ConnectionError("qdrant://localhost:6333 unreachable")
-        )
-
-        with patch.object(mcp_mod, "_get_orchestrator", return_value=mock_orch):
-            with patch.object(mcp_mod, "_validate_token", return_value=mock_token):
-                with pytest.raises(ValueError) as exc_info:
-                    await vectoraiz_search("test query")
-                error_data = json.loads(str(exc_info.value))
-                assert error_data["error"]["code"] == "internal_error"
-                assert "qdrant" not in error_data["error"]["message"]
 
     @pytest.mark.asyncio
     async def test_sql_hides_internal_error(self, mock_token):
@@ -552,21 +493,6 @@ class TestExistingToolsInputValidation:
                 mock_orch.get_schema.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_search_rejects_traversal_in_dataset_id(self, mock_token):
-        import app.mcp_server as mcp_mod
-
-        mock_orch = MagicMock()
-        mock_orch.search_vectors = AsyncMock()
-
-        with patch.object(mcp_mod, "_get_orchestrator", return_value=mock_orch):
-            with patch.object(mcp_mod, "_validate_token", return_value=mock_token):
-                with pytest.raises(ValueError) as exc_info:
-                    await vectoraiz_search("test query", dataset_id="../../etc/passwd")
-                error_data = json.loads(str(exc_info.value))
-                assert error_data["error"]["code"] == "invalid_input"
-                mock_orch.search_vectors.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_sql_rejects_traversal_in_dataset_id(self, mock_token):
         import app.mcp_server as mcp_mod
 
@@ -580,20 +506,3 @@ class TestExistingToolsInputValidation:
                 error_data = json.loads(str(exc_info.value))
                 assert error_data["error"]["code"] == "invalid_input"
                 mock_orch.execute_sql.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_search_allows_empty_dataset_id(self, mock_orchestrator, mock_token):
-        """Empty dataset_id should still work (means 'search all')."""
-        import app.mcp_server as mcp_mod
-
-        mock_orchestrator.search_vectors = AsyncMock(
-            return_value=SearchResponse(
-                matches=[], count=0, truncated=False, request_id="ext-test"
-            )
-        )
-
-        with patch.object(mcp_mod, "_get_orchestrator", return_value=mock_orchestrator):
-            with patch.object(mcp_mod, "_validate_token", return_value=mock_token):
-                result = await vectoraiz_search("test query", dataset_id="")
-                data = json.loads(result)
-                assert data["count"] == 0

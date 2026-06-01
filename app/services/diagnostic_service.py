@@ -109,7 +109,6 @@ def _collector_path(result: CollectorResult) -> str:
         "health": "health/health_snapshot.json",
         "config": "config/redacted_config.json",
         "system": "system/runtime.json",
-        "qdrant": "qdrant/collections.json",
         "database": "db/schema_version.json",
         "errors": "errors/registry.json",
         "issues": "issues.json",

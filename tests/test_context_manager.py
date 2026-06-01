@@ -5,7 +5,7 @@ Tests for CoPilotContextManager — Runtime state injection.
 Covers:
 - Context includes screen/route from StateSnapshot
 - Context includes active dataset
-- Context includes system state (connected_mode, Qdrant status)
+- Context includes system state (connected_mode, local mode)
 - Context includes user preferences (tone mode, quiet mode)
 - Route-to-screen mapping
 - Capability resolution
@@ -63,7 +63,6 @@ class TestContextBuilding:
     async def test_context_includes_system_state(self, _mock, ctx_manager):
         ctx = await ctx_manager.build_context()
         assert ctx.connected_mode is True
-        assert ctx.qdrant_status == "healthy"
         assert ctx.local_only is False
 
     @pytest.mark.asyncio

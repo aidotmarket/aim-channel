@@ -13,9 +13,7 @@ from datetime import datetime, timezone
 
 import psutil
 from fastapi import APIRouter, Depends
-from qdrant_client import QdrantClient
 
-from app.config import settings
 from app.core.structured_logging import APP_VERSION, get_uptime_s
 from app.auth.api_key_auth import get_current_user, AuthenticatedUser
 from app.services.duckdb_service import ephemeral_duckdb_service
@@ -55,7 +53,6 @@ async def deep_health_check(
     components = {}
 
     checks = [
-        ("qdrant", _check_qdrant()),
         ("duckdb", _check_duckdb()),
         ("llm", _check_llm()),
         ("trust_channel", _check_trust_channel()),
@@ -102,38 +99,6 @@ async def _bounded_check(name: str, coro) -> tuple[str, dict]:
     except Exception as e:
         logger.warning("health_check_error", extra={"component": name, "error": str(e)})
         return name, {"status": "down", "detail_safe": f"Check failed: {type(e).__name__}"}
-
-
-async def _check_qdrant() -> dict:
-    """Check Qdrant connectivity and latency."""
-    start = time.perf_counter()
-    try:
-        client = QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port, timeout=2.0)
-        collections = client.get_collections()
-        latency_ms = round((time.perf_counter() - start) * 1000, 1)
-
-        col_count = len(collections.collections)
-        total_vectors = sum(
-            getattr(c, "points_count", 0) or 0 for c in collections.collections
-        )
-
-        if latency_ms > 250:
-            status = "degraded"
-        else:
-            status = "ok"
-
-        return {
-            "status": status,
-            "latency_ms": latency_ms,
-            "detail_safe": f"{col_count} collections, {total_vectors} vectors",
-        }
-    except Exception as e:
-        latency_ms = round((time.perf_counter() - start) * 1000, 1)
-        return {
-            "status": "down",
-            "latency_ms": latency_ms,
-            "detail_safe": f"Connection failed: {type(e).__name__}",
-        }
 
 
 async def _check_duckdb() -> dict:

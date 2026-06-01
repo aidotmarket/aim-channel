@@ -64,7 +64,7 @@ def _make_dataset(
     data_categories=None,
     row_count=1000,
     freshness_score=0.8,
-    status="ready",
+    status="preview_ready",
     **overrides,
 ) -> DatasetRecord:
     meta = {

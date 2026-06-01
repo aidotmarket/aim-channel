@@ -113,5 +113,5 @@ class ConfirmResponse(BaseModel):
 class BatchConfirmResponse(BaseModel):
     batch_id: str
     confirmed: int
-    already_indexing_or_ready: int
+    already_confirmed_or_cancelled: int
     skipped_error: int

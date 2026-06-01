@@ -100,9 +100,9 @@ def get_matches(
     if not cached:
         raise HTTPException(status_code=404, detail="Cached request not found")
 
-    # Load all ready datasets
+    # Load all processed datasets
     datasets = db.exec(
-        select(DatasetRecord).where(DatasetRecord.status == "ready")
+        select(DatasetRecord).where(DatasetRecord.status == "preview_ready")
     ).all()
 
     matches = match_request(cached, list(datasets))
@@ -141,7 +141,7 @@ def create_draft(
     ).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    if dataset.status != "ready":
+    if dataset.status != "preview_ready":
         raise HTTPException(status_code=409, detail="Dataset is not ready")
 
     draft = ResponseDraft(

@@ -23,7 +23,7 @@ ALLAI_TOOLS = [
             "properties": {
                 "status_filter": {
                     "type": "string",
-                    "enum": ["all", "ready", "processing", "error"],
+                    "enum": ["all", "preview_ready", "processing", "error"],
                     "description": "Filter by processing status. Default: all",
                 },
             },
@@ -106,36 +106,9 @@ ALLAI_TOOLS = [
         },
     },
     {
-        "name": "search_vectors",
-        "description": (
-            "Semantic search across vectorized datasets. "
-            "Returns relevant chunks matching a natural language query. "
-            "Use for fuzzy/meaning-based search rather than exact SQL queries."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Natural language search query",
-                },
-                "dataset_id": {
-                    "type": "string",
-                    "description": "Limit search to a specific dataset (optional)",
-                },
-                "limit": {
-                    "type": "integer",
-                    "maximum": 20,
-                    "description": "Maximum results to return (default 5)",
-                },
-            },
-            "required": ["query"],
-        },
-    },
-    {
         "name": "get_system_status",
         "description": (
-            "Get system health info: Qdrant status, DuckDB availability, "
+            "Get system health info: DuckDB availability, "
             "LLM provider, connected mode. Use when user asks about system health."
         ),
         "input_schema": {

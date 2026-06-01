@@ -26,7 +26,6 @@ from app.services.processing_service import (
     ProcessingStatus,
     PROCESSABLE_TYPES,
 )
-from app.services.indexing_service import get_indexing_service, IndexingService
 from app.services.attestation_service import AttestationService, get_attestation_service
 from app.models.attestation_schemas import QualityAttestation
 from app.services.compliance_service import ComplianceService, get_compliance_service
@@ -253,45 +252,10 @@ async def upload_dataset(
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
-async def process_dataset_task(dataset_id: str, skip_indexing: bool = False):
-    """Background task to process an uploaded dataset.
-
-    Race-condition fix: after extraction in preview mode, check if the batch
-    was already confirmed (confirmed_at set). If so, auto-transition to
-    indexing so the user doesn't have to re-confirm.
-    """
+async def process_dataset_task(dataset_id: str):
+    """Background task to process an uploaded dataset."""
     processing = get_processing_service()
-    await processing.process_file(dataset_id, skip_indexing=skip_indexing)
-
-    if not skip_indexing:
-        return
-
-    # Check if the batch was confirmed while extraction was in progress
-    from app.core.database import get_session_context
-    from app.models.dataset import DatasetRecord as DBDatasetRecord
-
-    should_index = False
-    with get_session_context() as session:
-        db_row = session.get(DBDatasetRecord, dataset_id)
-        if db_row and db_row.confirmed_at and db_row.status == DatasetStatus.PREVIEW_READY.value:
-            logger.info(
-                "Auto-indexing dataset %s (batch confirmed during extraction)",
-                dataset_id,
-            )
-            db_row.status = DatasetStatus.INDEXING.value
-            db_row.updated_at = datetime.now(timezone.utc)
-            session.add(db_row)
-            session.commit()
-            should_index = True
-
-    if should_index:
-        await index_dataset_task(dataset_id)
-
-
-async def index_dataset_task(dataset_id: str):
-    """Background task to run index phase after confirm."""
-    processing = get_processing_service()
-    await processing.run_index_phase(dataset_id)
+    await processing.process_file(dataset_id)
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +330,8 @@ async def batch_upload(
 ):
     """
     BQ-108: Bulk upload multiple files.
-    mode=preview (default) stops at extraction; mode=process auto-indexes.
+    Processing now stops after extraction/profiling; the mode field is accepted
+    for backward compatibility.
     """
     if not files:
         raise HTTPException(status_code=422, detail="No files provided")
@@ -427,7 +392,6 @@ async def batch_upload(
         raise HTTPException(status_code=422, detail=str(e))
 
     bid = batch_id or f"bch_{uuid.uuid4().hex[:12]}"
-    skip_indexing = mode != "process"
     notifications = get_notification_service()
 
     items: List[dict] = list(rejected_items)  # start with rejected
@@ -483,7 +447,7 @@ async def batch_upload(
 
             # Queue background extraction (sequential — one file at a time)
             from app.services.processing_queue import get_processing_queue
-            await get_processing_queue().submit(record.id, skip_indexing=skip_indexing)
+            await get_processing_queue().submit(record.id)
 
             items.append({
                 "client_file_index": idx,
@@ -612,11 +576,7 @@ async def confirm_batch(
 
     result = batch_service.confirm_batch(batch_id, user.user_id)
 
-    # Queue indexing for each confirmed dataset (sequential)
-    from app.services.processing_queue import get_processing_queue
-    queue = get_processing_queue()
-    for ds_id in result.pop("confirmed_ids", []):
-        await queue.submit(ds_id, index_only=True)
+    result.pop("confirmed_ids", None)
 
     return JSONResponse(status_code=202, content=result)
 
@@ -633,8 +593,8 @@ async def get_dataset(
 
     response = record.to_dict()
 
-    # If ready, include full metadata from DuckDB
-    if record.status == ProcessingStatus.READY and record.processed_path:
+    # If processed, include full metadata from DuckDB
+    if record.status == ProcessingStatus.PREVIEW_READY and record.processed_path:
         try:
             def _get_metadata():
                 with ephemeral_duckdb_service() as duckdb:
@@ -706,8 +666,8 @@ async def confirm_dataset(
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
-    BQ-109: Confirm a dataset for indexing. Idempotent.
-    preview_ready → 202, indexing → 202 (no-op), ready → 200 (no-op),
+    BQ-109: Confirm a processed dataset. Idempotent.
+    preview_ready → 200 (no-op),
     extracting → 409, error → 409, cancelled → 404.
     """
     record = processing.get_dataset(dataset_id)
@@ -731,15 +691,7 @@ async def confirm_dataset(
             content={"status": status_val, "error": "Dataset in error state, cannot confirm"},
         )
 
-    if status_val == DatasetStatus.READY.value:
-        return JSONResponse(status_code=200, content={"status": "ready"})
-
-    if status_val == DatasetStatus.INDEXING.value:
-        return JSONResponse(status_code=202, content={"status": "indexing"})
-
     if status_val == DatasetStatus.PREVIEW_READY.value:
-        # Transition to indexing
-        processing._set_status(dataset_id, DatasetStatus.INDEXING)
         # Record confirmation
         from app.models.dataset import DatasetRecord as DBDatasetRecord
         from app.core.database import get_session_context
@@ -751,9 +703,7 @@ async def confirm_dataset(
                 session.add(db_row)
                 session.commit()
 
-        from app.services.processing_queue import get_processing_queue
-        await get_processing_queue().submit(dataset_id, index_only=True)
-        return JSONResponse(status_code=202, content={"status": "indexing"})
+        return JSONResponse(status_code=200, content={"status": "preview_ready"})
 
     # Fallback for uploaded state
     return JSONResponse(
@@ -779,7 +729,7 @@ async def run_processing_pipeline(
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
     
-    if record.status != ProcessingStatus.READY:
+    if record.status != ProcessingStatus.PREVIEW_READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready for pipeline. Current status: {record.status.value}"
@@ -815,7 +765,7 @@ async def process_full_pipeline(
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
 
-    if record.status != ProcessingStatus.READY:
+    if record.status != ProcessingStatus.PREVIEW_READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready for pipeline processing. Current status: {record.status.value}"
@@ -868,7 +818,7 @@ async def get_dataset_sample(
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
 
-    if record.status != ProcessingStatus.READY:
+    if record.status != ProcessingStatus.PREVIEW_READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}"
@@ -916,7 +866,7 @@ async def get_dataset_statistics(
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
 
-    if record.status != ProcessingStatus.READY:
+    if record.status != ProcessingStatus.PREVIEW_READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}"
@@ -950,7 +900,7 @@ async def get_dataset_profile(
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
 
-    if record.status != ProcessingStatus.READY:
+    if record.status != ProcessingStatus.PREVIEW_READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}"
@@ -985,7 +935,7 @@ async def generate_dataset_attestation(
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
     
-    if record.status != ProcessingStatus.READY:
+    if record.status != ProcessingStatus.PREVIEW_READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}"
@@ -1012,7 +962,7 @@ async def get_dataset_compliance(
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
     
-    if record.status != ProcessingStatus.READY:
+    if record.status != ProcessingStatus.PREVIEW_READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}"
@@ -1037,7 +987,7 @@ async def generate_listing_metadata(
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
     
-    if record.status not in (ProcessingStatus.READY, ProcessingStatus.PREVIEW_READY):
+    if record.status not in (ProcessingStatus.PREVIEW_READY, ProcessingStatus.PREVIEW_READY):
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}"
@@ -1053,54 +1003,20 @@ async def generate_listing_metadata(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.get("/{dataset_id}/searchability")
-async def get_dataset_searchability(
-    dataset_id: str,
-    processing: ProcessingService = Depends(get_processing_service),
-):
-    """
-    Get searchability score indicating how well the dataset can be semantically searched.
-    """
-    record = processing.get_dataset(dataset_id)
-    if not record:
-        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
-
-    if record.status != ProcessingStatus.READY:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Dataset not ready. Current status: {record.status.value}"
-        )
-
-    if not record.processed_path or not record.processed_path.exists():
-        raise HTTPException(status_code=500, detail="Processed file not found")
-
-    try:
-        def _get_searchability():
-            with ephemeral_duckdb_service() as duckdb:
-                return duckdb.calculate_searchability_score(record.processed_path)
-        searchability = await run_sync(_get_searchability)
-        return {
-            "dataset_id": dataset_id,
-            **searchability
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.get("/{dataset_id}/full")
 async def get_dataset_full_metadata(
     dataset_id: str,
     processing: ProcessingService = Depends(get_processing_service),
 ):
     """
-    Get comprehensive metadata including basic info, column profiles, and searchability.
+    Get comprehensive metadata including basic info and column profiles.
     This is the complete dataset analysis endpoint.
     """
     record = processing.get_dataset(dataset_id)
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
 
-    if record.status != ProcessingStatus.READY:
+    if record.status != ProcessingStatus.PREVIEW_READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}"
@@ -1136,7 +1052,7 @@ async def get_dataset_content(
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
     
-    if record.status != ProcessingStatus.READY:
+    if record.status != ProcessingStatus.PREVIEW_READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}"
@@ -1157,94 +1073,6 @@ async def get_dataset_content(
     }
 
 
-@router.post("/{dataset_id}/index")
-async def index_dataset(
-    dataset_id: str,
-    row_limit: int = 10000,
-    recreate: bool = False,
-    processing: ProcessingService = Depends(get_processing_service),
-    indexing: IndexingService = Depends(get_indexing_service),
-    user: AuthenticatedUser = Depends(get_current_user),
-    _meter: MeterDecision = Depends(metered("setup")),
-):
-    """
-    Trigger indexing for a dataset (runs in background).
-
-    Returns HTTP 202 with a job_id immediately. Indexing proceeds
-    as a background asyncio task. Check status via GET /{dataset_id}/index.
-    Requires X-API-Key header.
-    """
-    record = processing.get_dataset(dataset_id)
-    if not record:
-        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
-
-    if record.status != ProcessingStatus.READY:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Dataset not ready. Current status: {record.status.value}"
-        )
-
-    if not record.processed_path or not record.processed_path.exists():
-        raise HTTPException(status_code=500, detail="Processed file not found")
-
-    job_id = str(uuid.uuid4())
-    filepath = record.processed_path
-
-    async def _index_background():
-        try:
-            await run_sync(
-                indexing.index_dataset,
-                dataset_id, filepath, row_limit, None, recreate,
-            )
-            logger.info("Background indexing complete for dataset %s (job %s)", dataset_id, job_id)
-        except Exception:
-            logger.exception("Background indexing failed for dataset %s (job %s)", dataset_id, job_id)
-
-    asyncio.create_task(_index_background())
-
-    return JSONResponse(
-        status_code=202,
-        content={
-            "job_id": job_id,
-            "status": "indexing",
-            "dataset_id": dataset_id,
-        }
-    )
-
-
-@router.get("/{dataset_id}/index")
-async def get_index_status(
-    dataset_id: str,
-    processing: ProcessingService = Depends(get_processing_service),
-    indexing: IndexingService = Depends(get_indexing_service),
-):
-    """Get the indexing status for a dataset."""
-    record = processing.get_dataset(dataset_id)
-    if not record:
-        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
-    
-    return await run_sync(indexing.get_index_status, dataset_id)
-
-
-@router.delete("/{dataset_id}/index")
-async def delete_index(
-    dataset_id: str,
-    processing: ProcessingService = Depends(get_processing_service),
-    indexing: IndexingService = Depends(get_indexing_service),
-    user: AuthenticatedUser = Depends(get_current_user)
-):
-    """Delete the search index for a dataset. Requires X-API-Key header."""
-    record = processing.get_dataset(dataset_id)
-    if not record:
-        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
-    
-    success = await run_sync(indexing.delete_dataset_index, dataset_id)
-    if success:
-        return {"message": f"Index for dataset '{dataset_id}' deleted successfully"}
-    else:
-        raise HTTPException(status_code=404, detail="Index not found")
-
-
 @router.delete("/{dataset_id}")
 async def delete_dataset(
     dataset_id: str,
@@ -1263,7 +1091,6 @@ async def delete_dataset(
         DatasetStatus.UPLOADED.value,
         DatasetStatus.EXTRACTING.value,
         DatasetStatus.PREVIEW_READY.value,
-        DatasetStatus.INDEXING.value,
     ):
         processing._set_status(dataset_id, DatasetStatus.CANCELLED)
 
@@ -1304,7 +1131,7 @@ async def publish_to_marketplace(
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
 
-    if record.status != ProcessingStatus.READY:
+    if record.status != ProcessingStatus.PREVIEW_READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready for publish. Current status: {record.status.value}. "
@@ -1350,7 +1177,7 @@ async def get_dataset_readiness(
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
 
-    if record.status != ProcessingStatus.READY:
+    if record.status != ProcessingStatus.PREVIEW_READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}",

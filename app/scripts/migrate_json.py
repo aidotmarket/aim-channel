@@ -107,7 +107,7 @@ def migrate_datasets_json(engine) -> bool:
                     storage_filename=storage_filename,
                     file_type=file_type,
                     file_size_bytes=file_size,
-                    status=rec.get("status", "ready"),
+                    status=rec.get("status", "preview_ready"),
                     processed_path=rec.get("processed_path"),
                     metadata_json=json.dumps(metadata, default=str),
                     created_at=created_at,

@@ -28,7 +28,6 @@ except ImportError:
 
 from app.models.connectivity import (
     DatasetIdInput,
-    VectorSearchRequest,
     SQLQueryRequest,
 )
 from app.services.connectivity_token_service import ConnectivityTokenError
@@ -160,31 +159,6 @@ async def vectoraiz_get_schema(dataset_id: str) -> str:
         raise ValueError(_format_error(e.code, e.message, e.details))
     except Exception:
         logger.exception("Unexpected error in vectoraiz_get_schema")
-        raise ValueError(_format_error("internal_error", "An internal error occurred. Check vectorAIz logs for details."))
-
-
-@_tool()
-async def vectoraiz_search(query: str, dataset_id: str = "", top_k: int = 5) -> str:
-    """Semantic vector search across indexed documents and data chunks. Use natural language queries. Optionally limit to a specific dataset."""
-    try:
-        _try_meter("search_vectors", bucket="data")
-        token = _validate_token()
-        # Validate dataset_id if provided
-        validated_id = None
-        if dataset_id:
-            validated_id = _validate_dataset_id(dataset_id)
-        orch = _get_orchestrator()
-        req = VectorSearchRequest(
-            query=query,
-            dataset_id=validated_id,
-            top_k=max(1, min(top_k, 20)),
-        )
-        result = await orch.search_vectors(token, req)
-        return result.model_dump_json()
-    except ConnectivityError as e:
-        raise ValueError(_format_error(e.code, e.message, e.details))
-    except Exception:
-        logger.exception("Unexpected error in vectoraiz_search")
         raise ValueError(_format_error("internal_error", "An internal error occurred. Check vectorAIz logs for details."))
 
 

@@ -119,7 +119,7 @@ async def test_list_datasets():
         data = r.json()
         datasets = data if isinstance(data, list) else data.get("datasets", data.get("items", []))
         count = len(datasets)
-        ready = sum(1 for d in datasets if d.get("status") == "ready")
+        ready = sum(1 for d in datasets if d.get("status") == "preview_ready")
         ok = count >= 30  # we expect ~35
         record("List datasets (≥30 loaded)", "API", ok,
                f"total={count} ready={ready}", time.time()-t0)

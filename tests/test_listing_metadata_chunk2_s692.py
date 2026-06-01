@@ -98,7 +98,7 @@ async def test_datasets_router_precondition_relax_accepts_preview_ready():
 
 @pytest.mark.asyncio
 async def test_datasets_router_precondition_relax_accepts_ready_regression():
-    result, listing_service = await _call_route(ProcessingStatus.READY, 10.0)
+    result, listing_service = await _call_route(ProcessingStatus.PREVIEW_READY, 10.0)
     assert result.privacy_score == 10.0
     listing_service.generate_listing_metadata.assert_awaited_once_with("dataset")
 

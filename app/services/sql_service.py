@@ -134,7 +134,7 @@ class SQLService:
         tables = []
 
         for record in datasets:
-            if record.status == ProcessingStatus.READY and record.processed_path:
+            if record.status == ProcessingStatus.PREVIEW_READY and record.processed_path:
                 tables.append({
                     "table_name": self.get_dataset_table_name(record.id),
                     "dataset_id": record.id,
@@ -151,7 +151,7 @@ class SQLService:
         if not record:
             raise ValueError(f"Dataset '{dataset_id}' not found")
 
-        if record.status != ProcessingStatus.READY:
+        if record.status != ProcessingStatus.PREVIEW_READY:
             raise ValueError(f"Dataset '{dataset_id}' is not ready")
 
         if not record.processed_path or not record.processed_path.exists():
@@ -182,7 +182,7 @@ class SQLService:
             record = self.processing.get_dataset(dataset_id)
             if not record:
                 raise ValueError(f"Dataset '{dataset_id}' not found")
-            if record.status != ProcessingStatus.READY:
+            if record.status != ProcessingStatus.PREVIEW_READY:
                 raise ValueError(f"Dataset '{dataset_id}' is not ready")
             if not record.processed_path:
                 raise ValueError(f"Dataset '{dataset_id}' has no processed file")
@@ -191,7 +191,7 @@ class SQLService:
             # All ready datasets
             results = []
             for record in self.processing.list_datasets():
-                if record.status == ProcessingStatus.READY and record.processed_path:
+                if record.status == ProcessingStatus.PREVIEW_READY and record.processed_path:
                     self._validate_dataset_id(record.id)
                     results.append((record.id, record.processed_path))
             return results

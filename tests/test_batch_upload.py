@@ -236,39 +236,21 @@ def test_confirm_nonexistent():
     assert resp.status_code == 404
 
 
-def test_confirm_idempotent_on_ready():
-    """Confirming a READY dataset returns 200 (no-op)."""
+def test_confirm_idempotent_on_preview_ready():
+    """Confirming a PREVIEW_READY dataset returns 200 (no-op)."""
     from app.services.processing_service import get_processing_service
 
     processing = get_processing_service()
 
-    # Create a dataset and set it to READY
     record = processing.create_dataset("idempotent_ready.csv", "csv")
-    processing._set_status(record.id, DatasetStatus.READY)
+    processing._set_status(record.id, DatasetStatus.PREVIEW_READY)
 
     resp = client.post(
         f"/api/datasets/{record.id}/confirm",
         json={"index": True},
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ready"
-
-
-def test_confirm_idempotent_on_indexing():
-    """Confirming an INDEXING dataset returns 202 (no-op)."""
-    from app.services.processing_service import get_processing_service
-
-    processing = get_processing_service()
-
-    record = processing.create_dataset("idempotent_indexing.csv", "csv")
-    processing._set_status(record.id, DatasetStatus.INDEXING)
-
-    resp = client.post(
-        f"/api/datasets/{record.id}/confirm",
-        json={"index": True},
-    )
-    assert resp.status_code == 202
-    assert resp.json()["status"] == "indexing"
+    assert resp.json()["status"] == "preview_ready"
 
 
 def test_confirm_error_state_returns_409():
@@ -371,11 +353,11 @@ def test_single_file_upload_backward_compat():
 
 
 # ---------------------------------------------------------------------------
-# 10. Mode=process skips preview
+# 10. Mode=process remains backward compatible
 # ---------------------------------------------------------------------------
 
 def test_mode_process():
-    """mode=process triggers full pipeline (no preview_ready stop)."""
+    """mode=process is accepted but processing still ends at preview_ready."""
     resp = _make_upload(["process_mode.csv"], mode="process")
     assert resp.status_code == 202
     body = resp.json()
@@ -387,8 +369,8 @@ def test_mode_process():
 # ---------------------------------------------------------------------------
 
 def test_dataset_status_enum_values():
-    """Verify all 7 status values exist."""
-    expected = {"uploaded", "extracting", "preview_ready", "indexing", "ready", "cancelled", "error"}
+    """Verify status values."""
+    expected = {"uploaded", "extracting", "preview_ready", "cancelled", "error"}
     actual = {s.value for s in DatasetStatus}
     assert actual == expected
 

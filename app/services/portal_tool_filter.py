@@ -2,7 +2,7 @@
 Portal Tool Filter — Allowlist wrapper for allAI tools in portal context.
 
 Security model:
-- Only READ_ONLY search tools are allowed (no mutations, no admin tools)
+- Only READ_ONLY data tools are allowed (no mutations, no admin tools)
 - Dataset ACL enforced on every tool call (portal_visible check)
 - Wraps AllAIToolExecutor with pre-execution filtering
 - Default-deny: any tool not in PORTAL_ALLOWED_TOOLS is blocked
@@ -18,13 +18,12 @@ from app.services.allai_tool_result import ToolResult
 
 logger = logging.getLogger(__name__)
 
-# Portal users can ONLY use these read-only search tools.
+# Portal users can ONLY use these read-only data tools.
 # Everything else (mutations, admin, connectivity, tunnel, artifacts) is blocked.
 PORTAL_ALLOWED_TOOLS: Set[str] = {
     "list_datasets",
     "get_dataset_detail",
     "preview_rows",
-    "search_vectors",
     "get_dataset_statistics",
     "run_sql_query",
 }
@@ -33,7 +32,6 @@ PORTAL_ALLOWED_TOOLS: Set[str] = {
 DATASET_SCOPED_TOOLS: Set[str] = {
     "get_dataset_detail",
     "preview_rows",
-    "search_vectors",
     "get_dataset_statistics",
     "run_sql_query",
 }

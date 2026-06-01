@@ -1,10 +1,9 @@
 # =============================================================================
 # AIM-Data — Customer Deployment (docker-compose.aim-data.yml)
 # =============================================================================
-# Three containers:
+# Two containers:
 #   1. vectoraiz — nginx (UI) + uvicorn (API) in one image
 #   2. postgres  — Metadata, local auth, usage tracking
-#   3. qdrant    — Vector database for semantic search
 #
 # Usage:
 #   docker compose -f docker-compose.aim-data.yml up -d
@@ -30,9 +29,7 @@ services:
       - VECTORAIZ_SECRET_KEY=${VECTORAIZ_SECRET_KEY:-}
       - AIM_DATA_APIKEY_HMAC_SECRET=${AIM_DATA_APIKEY_HMAC_SECRET:-}
       - DATABASE_URL=postgresql://vectoraiz:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/vectoraiz
-      - QDRANT_HOST=qdrant
       - AIM_DATA_MAX_CONCURRENT_PROCESSING=${AIM_DATA_MAX_CONCURRENT_PROCESSING:-2}
-      - QDRANT_PORT=6333
       - AIM_DATA_AUTH_ENABLED=true
       - AIM_DATA_CONNECTIVITY_ENABLED=true
       - AI_MARKET_AWS_ACCOUNT_ID=${AI_MARKET_AWS_ACCOUNT_ID:-948749907373}
@@ -64,8 +61,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      qdrant:
-        condition: service_healthy
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -93,23 +88,6 @@ services:
         max-size: "50m"
         max-file: "3"
 
-  qdrant:
-    image: qdrant/qdrant:v1.13.2
-    volumes:
-      - qdrant-storage:/qdrant/storage
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/6333'"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-    restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"
-
 volumes:
   aim-data-data:
   postgres-data:
-  qdrant-storage:

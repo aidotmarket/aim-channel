@@ -23,10 +23,8 @@ from app.models.connectivity import (
     ERROR_HTTP_STATUS,
     HealthResponse,
     SchemaResponse,
-    SearchResponse,
     SQLQueryRequest,
     SQLResponse,
-    VectorSearchRequest,
 )
 from app.services.connectivity_metrics import get_connectivity_metrics
 from app.services.query_orchestrator import ConnectivityError, get_query_orchestrator
@@ -160,43 +158,6 @@ async def ext_get_schema(
         raw_token = _extract_token(authorization)
         token = orch.validate_token(raw_token)
         return await orch.get_schema(token, dataset_id, client_ip=client_ip)
-    except ConnectivityError as e:
-        _record_auth_failure_if_needed(e, request)
-        return _error_response(e, request_id)
-
-
-# ------------------------------------------------------------------
-# Search vectors
-# ------------------------------------------------------------------
-
-@router.post(
-    "/search",
-    response_model=SearchResponse,
-    summary="Semantic vector search",
-    description="Performs semantic vector similarity search across datasets. Accepts a natural language query and returns the most relevant matches ranked by score.",
-    responses={
-        400: {"model": ConnectivityErrorResponse, "description": "Invalid request body"},
-        401: {"model": ConnectivityErrorResponse, "description": "Invalid, revoked, or expired token"},
-        403: {"model": ConnectivityErrorResponse, "description": "Token lacks ext:search scope"},
-        429: {"model": ConnectivityErrorResponse, "description": "Rate limited or IP blocked"},
-        503: {"model": ConnectivityErrorResponse, "description": "Service unavailable"},
-    },
-)
-async def ext_search(
-    body: VectorSearchRequest,
-    request: Request,
-    authorization: Optional[str] = Header(None),
-):
-    request_id = _make_request_id()
-    try:
-        client_ip = _get_client_ip(request)
-        orch = get_query_orchestrator()
-        blocked = orch.rate_limiter.check_ip_blocked(client_ip)
-        if blocked:
-            return _error_response(ConnectivityError("ip_blocked", "Too many auth failures"), request_id)
-        raw_token = _extract_token(authorization)
-        token = orch.validate_token(raw_token)
-        return await orch.search_vectors(token, body, client_ip=client_ip)
     except ConnectivityError as e:
         _record_auth_failure_if_needed(e, request)
         return _error_response(e, request_id)

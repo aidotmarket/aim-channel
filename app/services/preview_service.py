@@ -74,7 +74,7 @@ class PreviewService:
                 "error_message": record.error or "Unknown error",
             }
 
-        # preview_ready, indexing, or ready — return cached preview
+        # preview_ready — return cached preview
         return self._build_full_preview(record, status)
 
     def _build_full_preview(self, record, status: str) -> Dict[str, Any]:

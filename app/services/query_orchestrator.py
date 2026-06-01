@@ -29,12 +29,9 @@ from app.models.connectivity import (
     ProfileColumnInfo,
     ProfileResponse,
     SchemaResponse,
-    SearchMatch,
-    SearchResponse,
     SQLLimits,
     SQLQueryRequest,
     SQLResponse,
-    VectorSearchRequest,
 )
 from app.services.connectivity_audit import audit_log
 from app.services.connectivity_metrics import get_connectivity_metrics
@@ -131,14 +128,9 @@ class QueryOrchestrator:
             with get_session_context() as session:
                 stmt = select(DBDatasetRecord).where(
                     DBDatasetRecord.externally_queryable == True,  # noqa: E712
-                    DBDatasetRecord.status == "ready",
+                    DBDatasetRecord.status == "preview_ready",
                 )
                 db_records = session.exec(stmt).all()
-
-            # Check which have vectors
-            from app.services.qdrant_service import get_qdrant_service
-            qdrant = get_qdrant_service()
-            collections = {c["name"] for c in qdrant.list_collections()}
 
             datasets = []
             for rec in db_records:
@@ -148,7 +140,6 @@ class QueryOrchestrator:
                 except (ValueError, TypeError):
                     meta = {}
 
-                collection_name = f"dataset_{rec.id}"
                 datasets.append(DatasetInfo(
                     id=rec.id,
                     name=rec.original_filename,
@@ -157,7 +148,7 @@ class QueryOrchestrator:
                     row_count=meta.get("row_count", 0),
                     column_count=meta.get("column_count", 0),
                     created_at=rec.created_at.isoformat() if rec.created_at else "",
-                    has_vectors=collection_name in collections,
+                    has_vectors=False,
                 ))
 
             duration_ms = int((time.time() - start) * 1000)
@@ -273,88 +264,6 @@ class QueryOrchestrator:
             logger.exception("get_schema failed: %s", e)
             raise ConnectivityError("internal_error", "Internal error getting schema")
 
-    # ------------------------------------------------------------------
-    # Tool: search_vectors
-    # ------------------------------------------------------------------
-
-    async def search_vectors(
-        self, token: ConnectivityToken, req: VectorSearchRequest, client_ip: str = "127.0.0.1"
-    ) -> SearchResponse:
-        """Semantic vector search (§5.2)."""
-        self._check_enabled()
-        self._enforce_scope(token, "ext:search")
-        self._enforce_rate_limit(token, "search_vectors", client_ip)
-
-        request_id = self._make_request_id()
-        start = time.time()
-
-        try:
-            self.rate_limiter.record_request(token.id, "search_vectors")
-
-            # If dataset_id specified, verify it's queryable
-            if req.dataset_id:
-                self._get_queryable_dataset(req.dataset_id)
-
-            from app.services.search_service import get_search_service
-            search_svc = get_search_service()
-
-            result = search_svc.search(
-                query=req.query,
-                dataset_id=req.dataset_id,
-                limit=req.top_k,
-            )
-
-            matches = []
-            for r in result.get("results", []):
-                text_content = r.get("text_content") or ""
-                if len(text_content) > 2000:
-                    text_content = text_content[:2000]
-
-                matches.append(SearchMatch(
-                    id=str(r.get("row_index", "")),
-                    score=r.get("score", 0.0),
-                    text=text_content,
-                    metadata={
-                        "source_file": r.get("dataset_name", ""),
-                        "dataset_id": r.get("dataset_id", ""),
-                        "dataset_name": r.get("dataset_name", ""),
-                    },
-                ))
-
-            truncated = len(matches) >= req.top_k
-
-            duration_ms = int((time.time() - start) * 1000)
-            self.metrics.record_request("search_vectors", duration_ms)
-            audit_log(
-                tool_name="search_vectors", token_id=token.id,
-                dataset_id=req.dataset_id, duration_ms=duration_ms,
-                row_count=len(matches), error_code=None, request_id=request_id,
-            )
-
-            return SearchResponse(
-                matches=matches,
-                count=len(matches),
-                truncated=truncated,
-                request_id=request_id,
-            )
-
-        except ConnectivityError:
-            raise
-        except Exception as e:
-            duration_ms = int((time.time() - start) * 1000)
-            self.metrics.record_error("internal_error")
-            audit_log(
-                tool_name="search_vectors", token_id=token.id,
-                dataset_id=req.dataset_id, duration_ms=duration_ms,
-                row_count=None, error_code="internal_error", request_id=request_id,
-            )
-            logger.exception("search_vectors failed: %s", e)
-            raise ConnectivityError("internal_error", "Internal error during search")
-
-    # ------------------------------------------------------------------
-    # Tool: execute_sql
-    # ------------------------------------------------------------------
-
     async def execute_sql(
         self, token: ConnectivityToken, req: SQLQueryRequest, client_ip: str = "127.0.0.1"
     ) -> SQLResponse:
@@ -421,7 +330,7 @@ class QueryOrchestrator:
 
                 for ds_id in queryable_ids:
                     record = processing.get_dataset(ds_id)
-                    if record and record.status == ProcessingStatus.READY and record.processed_path:
+                    if record and record.status == ProcessingStatus.PREVIEW_READY and record.processed_path:
                         escaped = sql_quote_literal(str(record.processed_path))
                         conn.execute(
                             f"CREATE OR REPLACE VIEW dataset_{ds_id} "
@@ -696,12 +605,12 @@ class QueryOrchestrator:
                 raise ConnectivityError("dataset_not_found", f"Dataset '{dataset_id}' not found")
             if not record.externally_queryable:
                 raise ConnectivityError("dataset_not_found", f"Dataset '{dataset_id}' is not available for external queries")
-            if record.status != "ready":
+            if record.status != "preview_ready":
                 raise ConnectivityError("dataset_not_found", f"Dataset '{dataset_id}' is not ready")
             return record
 
     def _get_all_queryable_dataset_ids(self) -> List[str]:
-        """Get IDs of all externally queryable, ready datasets."""
+        """Get IDs of all externally queryable, processed datasets."""
         from app.core.database import get_session_context
         from app.models.dataset import DatasetRecord as DBDatasetRecord
         from sqlmodel import select
@@ -709,7 +618,7 @@ class QueryOrchestrator:
         with get_session_context() as session:
             stmt = select(DBDatasetRecord.id).where(
                 DBDatasetRecord.externally_queryable == True,  # noqa: E712
-                DBDatasetRecord.status == "ready",
+                DBDatasetRecord.status == "preview_ready",
             )
             return [row for row in session.exec(stmt).all()]
 

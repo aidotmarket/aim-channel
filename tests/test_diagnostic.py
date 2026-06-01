@@ -52,8 +52,6 @@ class TestConfigRedaction:
         config = {
             "app_name": "vectorAIz",
             "debug": False,
-            "qdrant_host": "qdrant",
-            "qdrant_port": 6333,
             "cors_origins": ["http://localhost:5173"],
         }
         redacted = redact_config(config)
@@ -338,20 +336,6 @@ class TestIndividualCollectors:
         assert result.error is None
         assert "asyncio_task_count" in result.data
         assert result.data["asyncio_task_count"] > 0
-
-    @pytest.mark.asyncio
-    async def test_qdrant_collector_handles_connection_failure(self):
-        """QdrantCollector returns error on connection failure (graceful)."""
-        from app.services.diagnostic_collectors import QdrantCollector
-
-        collector = QdrantCollector()
-        collector.timeout = 3.0
-        result = await collector.safe_collect()
-        # In CI/test environment Qdrant is likely not running
-        # The collector should either succeed or return a clean error
-        assert isinstance(result.data, dict)
-        if result.error:
-            assert isinstance(result.error, str)
 
     @pytest.mark.asyncio
     async def test_log_collector_returns_entries(self):

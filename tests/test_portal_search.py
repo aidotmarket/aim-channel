@@ -31,17 +31,14 @@ def client():
 
 def _make_search_results(columns, n=5):
     """Build fake search results with the given columns."""
-    return {
-        "results": [
-            {
-                "score": 0.9 - i * 0.05,
-                "row_data": {col: f"val_{col}_{i}" for col in columns},
-                "text_content": f"text content {i}",
-            }
-            for i in range(n)
-        ],
-        "total": n,
-    }
+    return [
+        {
+            "score": 0.9 - i * 0.05,
+            "row_data": {col: f"val_{col}_{i}" for col in columns},
+            "text_content": f"text content {i}",
+        }
+        for i in range(n)
+    ]
 
 
 @pytest.fixture
@@ -73,11 +70,12 @@ def test_search_results_only_contain_display_columns(client, open_portal_with_da
     """Search results for restricted dataset only include display_columns."""
     fake_results = _make_search_results(["name", "category", "secret_field", "internal_id"])
 
-    with patch("app.services.portal_service.get_search_service") as mock_search, \
+    with patch("app.services.portal_service.PortalService._keyword_search") as mock_search, \
          patch("app.services.portal_service.get_processing_service") as mock_proc:
-        mock_search.return_value.search.return_value = fake_results
+        mock_search.return_value = fake_results
         mock_record = MagicMock()
         mock_record.original_filename = "test.csv"
+        mock_record.processed_path = "/tmp/test.parquet"
         mock_proc.return_value.get_dataset.return_value = mock_record
 
         resp = client.post(
@@ -98,11 +96,12 @@ def test_search_all_columns_when_display_empty(client, open_portal_with_datasets
     """When display_columns is empty, all columns are returned."""
     fake_results = _make_search_results(["col_a", "col_b", "col_c"], n=2)
 
-    with patch("app.services.portal_service.get_search_service") as mock_search, \
+    with patch("app.services.portal_service.PortalService._keyword_search") as mock_search, \
          patch("app.services.portal_service.get_processing_service") as mock_proc:
-        mock_search.return_value.search.return_value = fake_results
+        mock_search.return_value = fake_results
         mock_record = MagicMock()
         mock_record.original_filename = "all_cols.csv"
+        mock_record.processed_path = "/tmp/test.parquet"
         mock_proc.return_value.get_dataset.return_value = mock_record
 
         resp = client.post(
@@ -119,11 +118,12 @@ def test_search_all_columns_when_display_empty(client, open_portal_with_datasets
 
 def test_max_results_caps_search_limit(client, open_portal_with_datasets):
     """Dataset max_results=3 caps the limit even if client requests more."""
-    with patch("app.services.portal_service.get_search_service") as mock_search, \
+    with patch("app.services.portal_service.PortalService._keyword_search") as mock_search, \
          patch("app.services.portal_service.get_processing_service") as mock_proc:
-        mock_search.return_value.search.return_value = _make_search_results(["name"], n=3)
+        mock_search.return_value = _make_search_results(["name"], n=3)
         mock_record = MagicMock()
         mock_record.original_filename = "test.csv"
+        mock_record.processed_path = "/tmp/test.parquet"
         mock_proc.return_value.get_dataset.return_value = mock_record
 
         resp = client.post(
@@ -132,7 +132,7 @@ def test_max_results_caps_search_limit(client, open_portal_with_datasets):
         )
 
     assert resp.status_code == 200
-    call_kwargs = mock_search.return_value.search.call_args
+    call_kwargs = mock_search.call_args
     called_limit = call_kwargs.kwargs.get("limit") if call_kwargs.kwargs else call_kwargs[1].get("limit")
     assert called_limit is not None
     assert called_limit <= 3
@@ -142,11 +142,12 @@ def test_get_search_single_dataset(client, open_portal_with_datasets):
     """GET /api/portal/search/{dataset_id}?q=... works."""
     fake_results = _make_search_results(["name", "category"], n=1)
 
-    with patch("app.services.portal_service.get_search_service") as mock_search, \
+    with patch("app.services.portal_service.PortalService._keyword_search") as mock_search, \
          patch("app.services.portal_service.get_processing_service") as mock_proc:
-        mock_search.return_value.search.return_value = fake_results
+        mock_search.return_value = fake_results
         mock_record = MagicMock()
         mock_record.original_filename = "test.csv"
+        mock_record.processed_path = "/tmp/test.parquet"
         mock_proc.return_value.get_dataset.return_value = mock_record
 
         resp = client.get("/api/portal/search/ds-restricted?q=hello&limit=10")

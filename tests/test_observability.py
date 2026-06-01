@@ -55,10 +55,10 @@ class TestErrorRegistryLoading:
         """Lookup a known code returns the correct entry."""
         registry = ErrorRegistry()
         registry.load()
-        entry = registry.lookup("VAI-QDR-001")
-        assert entry.code == "VAI-QDR-001"
-        assert entry.domain == "QDR"
-        assert entry.title == "Qdrant unreachable"
+        entry = registry.lookup("VAI-DB-001")
+        assert entry.code == "VAI-DB-001"
+        assert entry.domain == "DB"
+        assert entry.title == "Database unavailable"
         assert entry.retryable is True
         assert entry.http_status == 503
         assert len(entry.remediation) > 0
@@ -80,10 +80,10 @@ class TestErrorRegistryLoading:
         """Retrieve codes filtered by domain."""
         registry = ErrorRegistry()
         registry.load()
-        qdr_codes = registry.codes_for_domain("QDR")
-        assert len(qdr_codes) >= 1
-        for code in qdr_codes:
-            assert code.startswith("VAI-QDR-")
+        db_codes = registry.codes_for_domain("DB")
+        assert len(db_codes) >= 1
+        for code in db_codes:
+            assert code.startswith("VAI-DB-")
 
     def test_validation_rejects_bad_code_format(self):
         """Registry rejects entries with malformed code."""
@@ -137,7 +137,7 @@ class TestErrorRegistryLoading:
                 "schema_version": 1,
                 "errors": [{
                     "code": "VAI-API-001",
-                    "domain": "QDR",  # mismatch
+                    "domain": "DB",  # mismatch
                     "title": "test",
                     "severity": "WARN",
                     "retryable": False,
@@ -162,10 +162,10 @@ class TestVectorAIzError:
 
     def test_valid_code(self):
         """Creating error with valid code works."""
-        err = VectorAIzError("VAI-QDR-001", detail="connection refused")
-        assert err.code == "VAI-QDR-001"
+        err = VectorAIzError("VAI-DB-001", detail="connection refused")
+        assert err.code == "VAI-DB-001"
         assert err.detail == "connection refused"
-        assert str(err) == "VAI-QDR-001: connection refused"
+        assert str(err) == "VAI-DB-001: connection refused"
 
     def test_invalid_code_raises(self):
         """Creating error with bad code format raises ValueError."""
@@ -197,14 +197,14 @@ class TestErrorMiddleware:
         registry.load()
 
         with patch("app.core.errors.middleware.error_registry", registry):
-            exc = VectorAIzError("VAI-QDR-001", detail="internal detail")
+            exc = VectorAIzError("VAI-DB-001", detail="internal detail")
             request = MagicMock()
             response = await vectoraiz_error_handler(request, exc)
 
             assert response.status_code == 503
             body = json.loads(response.body)
-            assert body["error"]["code"] == "VAI-QDR-001"
-            assert body["error"]["title"] == "Qdrant unreachable"
+            assert body["error"]["code"] == "VAI-DB-001"
+            assert body["error"]["title"] == "Database unavailable"
             assert body["error"]["retryable"] is True
             assert "remediation" in body["error"]
             # Internal detail must NOT appear in response
@@ -383,18 +383,18 @@ class TestIssueTracker:
     def test_record_and_retrieve(self):
         """Record an issue and retrieve it."""
         tracker = IssueTracker(persist_path="/tmp/test_issues.json", max_size=10)
-        tracker.record("VAI-QDR-001", "qdrant")
+        tracker.record("VAI-DB-001", "database")
         issues = tracker.get_active_issues()
         assert len(issues) == 1
-        assert issues[0]["code"] == "VAI-QDR-001"
+        assert issues[0]["code"] == "VAI-DB-001"
         assert issues[0]["count"] == 1
 
     def test_duplicate_increments_count(self):
         """Recording the same code increments count."""
         tracker = IssueTracker(persist_path="/tmp/test_issues.json", max_size=10)
-        tracker.record("VAI-QDR-001", "qdrant")
-        tracker.record("VAI-QDR-001", "qdrant")
-        tracker.record("VAI-QDR-001", "qdrant")
+        tracker.record("VAI-DB-001", "database")
+        tracker.record("VAI-DB-001", "database")
+        tracker.record("VAI-DB-001", "database")
         issues = tracker.get_active_issues()
         assert len(issues) == 1
         assert issues[0]["count"] == 3
@@ -499,7 +499,7 @@ class TestCodePattern:
     """Test error code regex pattern."""
 
     @pytest.mark.parametrize("code,valid", [
-        ("VAI-QDR-001", True),
+        ("VAI-DB-001", True),
         ("VAI-API-999", True),
         ("VAI-SYSTEM-001", True),   # SYSTEM is 6 chars, valid format (domain validation is separate)
         ("VAI-AB-001", True),       # 2-char domain

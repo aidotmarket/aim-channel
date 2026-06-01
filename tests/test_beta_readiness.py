@@ -277,7 +277,7 @@ class VZClient:
                        timeout: int = PROCESSING_POLL_TIMEOUT) -> str:
         """Poll status until ready/error or timeout. Returns final status string."""
         deadline = time.time() + timeout
-        terminal_statuses = {"ready", "error", "failed", "rejected", "unsupported"}
+        terminal_statuses = {"preview_ready", "error", "failed", "rejected", "unsupported"}
         consecutive_errors = 0
         while time.time() < deadline:
             try:
@@ -352,7 +352,7 @@ def _upload_and_process(client: VZClient, filepath: Path,
     # Wait for ready
     t0 = time.time()
     final_status = client.wait_for_ready(dataset_id)
-    if final_status == "ready":
+    if final_status == "preview_ready":
         suite.record(f"{prefix}/processing", True, time.time() - t0)
     else:
         suite.record(f"{prefix}/processing", False, time.time() - t0,
@@ -386,7 +386,7 @@ def _test_processing_endpoints(client: VZClient, dataset_id: str,
     try:
         r = client.get(f"/api/datasets/{dataset_id}/status")
         r.raise_for_status()
-        assert r.json().get("status", "").lower() == "ready"
+        assert r.json().get("status", "").lower() == "preview_ready"
         suite.record(f"{prefix}/status", True, time.time() - t0)
     except Exception as e:
         suite.record(f"{prefix}/status", False, time.time() - t0, str(e))
@@ -614,7 +614,7 @@ def _run_batch_upload(client: VZClient, suite: TestSuite) -> List[str]:
     all_ready = True
     for did in dataset_ids:
         status = client.wait_for_ready(did)
-        if status != "ready":
+        if status != "preview_ready":
             all_ready = False
             suite.record(f"batch/processing/{did[:8]}", False, time.time() - t0,
                          f"Status: {status}")
@@ -777,7 +777,7 @@ def _concurrent_upload(client: VZClient, files: List[str], tier: str,
         prefix = f"upload/{tier}/{fname}"
         t0 = time.time()
         status = client.wait_for_ready(did)
-        if status == "ready":
+        if status == "preview_ready":
             suite.record(f"{prefix}/processing", True, time.time() - t0)
             ready_results.append((fname, did))
         else:
@@ -817,7 +817,7 @@ def _sequential_upload(client: VZClient, files: List[str], tier: str,
         t0 = time.time()
         try:
             status = client.wait_for_ready(did)
-            if status == "ready":
+            if status == "preview_ready":
                 suite.record(f"{prefix}/processing", True, time.time() - t0)
             else:
                 suite.record(f"{prefix}/processing", False, time.time() - t0,
@@ -1367,7 +1367,7 @@ class TestBetaReadiness:
             did = item.get("dataset_id")
             if did and item.get("status") == "accepted":
                 status = client.wait_for_ready(did, timeout=300)
-                assert status == "ready", f"Batch item {did[:8]} status: {status}"
+                assert status == "preview_ready", f"Batch item {did[:8]} status: {status}"
                 # Clean up
                 client.delete(f"/api/datasets/{did}")
                 break
@@ -1387,7 +1387,7 @@ class TestBetaReadiness:
             result = client.upload_file(fp)
             did = result["dataset_id"]
             status = client.wait_for_ready(did)
-            assert status == "ready"
+            assert status == "preview_ready"
 
         r = client.delete(f"/api/datasets/{did}")
         assert r.status_code in (200, 204)
@@ -1442,7 +1442,7 @@ class TestBetaReadiness:
         t0 = time.time()
         status = client.wait_for_ready(dataset_id, timeout=PROCESSING_POLL_TIMEOUT)
         proc_time = time.time() - t0
-        assert status == "ready", (
+        assert status == "preview_ready", (
             f"50MB CSV processing failed: status={status} "
             f"(upload={upload_time:.1f}s, processing={proc_time:.1f}s)"
         )
@@ -1496,7 +1496,7 @@ class TestBetaReadiness:
         t0 = time.time()
         status = client.wait_for_ready(dataset_id, timeout=PROCESSING_POLL_TIMEOUT)
         proc_time = time.time() - t0
-        assert status == "ready", (
+        assert status == "preview_ready", (
             f"10MB CSV processing failed: status={status} "
             f"(upload={upload_time:.1f}s, processing={proc_time:.1f}s)"
         )
@@ -1531,7 +1531,7 @@ class TestBetaReadiness:
         assert dataset_id
 
         status = client.wait_for_ready(dataset_id, timeout=120)
-        assert status == "ready", f"Processing failed: {status}"
+        assert status == "preview_ready", f"Processing failed: {status}"
 
         # Check row count via metadata or statistics
         r = client.get(f"/api/datasets/{dataset_id}")
@@ -1611,7 +1611,7 @@ class TestBetaReadiness:
         dataset_ids = [item["dataset_id"] for item in items if item.get("dataset_id")]
 
         # Wait for all items to finish extraction (preview_ready) before confirming
-        preview_states = {"preview_ready", "ready", "error", "failed"}
+        preview_states = {"preview_ready", "preview_ready", "error", "failed"}
         for did in dataset_ids:
             deadline = time.time() + 120
             while time.time() < deadline:
@@ -1631,7 +1631,7 @@ class TestBetaReadiness:
         ready_count = 0
         for did in dataset_ids:
             status = client.wait_for_ready(did, timeout=180)
-            if status == "ready":
+            if status == "preview_ready":
                 ready_count += 1
             client.delete(f"/api/datasets/{did}")
 
@@ -1686,7 +1686,7 @@ class TestBetaReadiness:
             r = client.get(f"/api/datasets/{dataset_id}/status")
             if r.status_code == 200:
                 final_st = r.json().get("status", "").lower()
-                if final_st in ("preview_ready", "ready", "error", "failed"):
+                if final_st in ("preview_ready", "preview_ready", "error", "failed"):
                     break
             time.sleep(2)
 
@@ -1706,7 +1706,7 @@ class TestBetaReadiness:
                 f"Confirm failed: {r.status_code}: {r.text[:300]}"
             if r.status_code == 202:
                 status = client.wait_for_ready(dataset_id, timeout=300)
-                assert status == "ready", f"After confirm, status: {status}"
+                assert status == "preview_ready", f"After confirm, status: {status}"
 
         # Cleanup
         client.delete(f"/api/datasets/{dataset_id}")
@@ -1852,7 +1852,7 @@ class TestBetaReadiness:
             if did:
                 # Even if processing fails, it should fail gracefully
                 status = client.wait_for_ready(did, timeout=120)
-                assert status in ("ready", "error", "failed"), \
+                assert status in ("preview_ready", "error", "failed"), \
                     f"Unexpected status for malformed CSV: {status}"
                 client.delete(f"/api/datasets/{did}")
 
@@ -1915,7 +1915,7 @@ class TestBetaReadiness:
         if not did:
             return None
         status = client.wait_for_ready(did)
-        if status == "ready":
+        if status == "preview_ready":
             _pytest_datasets[fname] = did
             return did
         return None
@@ -1933,7 +1933,7 @@ class TestBetaReadiness:
         # Verify status
         r = client.get(f"/api/datasets/{did}/status")
         assert r.status_code == 200
-        assert r.json().get("status", "").lower() == "ready"
+        assert r.json().get("status", "").lower() == "preview_ready"
 
         # Verify sample
         r = client.get(f"/api/datasets/{did}/sample")

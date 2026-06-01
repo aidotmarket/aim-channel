@@ -87,7 +87,7 @@ class TestConnectivityToolDefinitions:
         """Original 8 tools must still exist."""
         original = [
             "list_datasets", "get_dataset_detail", "preview_rows",
-            "run_sql_query", "search_vectors", "get_system_status",
+            "run_sql_query", "get_system_status",
             "get_dataset_statistics", "delete_dataset",
         ]
         tool_names = _get_tool_names()
@@ -425,7 +425,7 @@ class TestConnectivityGenerateSetupHandler:
             mock_record = MagicMock()
             mock_record.id = "ds001"
             mock_record.original_filename = "sales_data.csv"
-            mock_record.status.value = "ready"
+            mock_record.status.value = "preview_ready"
             mock_record.metadata = {
                 "row_count": 1000,
                 "column_count": 10,

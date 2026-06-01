@@ -44,7 +44,7 @@ def _upload_csv(filename: str = "test.csv", content: bytes = None) -> dict:
     return resp.json()
 
 
-def _make_mock_record(status=ProcessingStatus.READY, processed_path_exists=True):
+def _make_mock_record(status=ProcessingStatus.PREVIEW_READY, processed_path_exists=True):
     """Create a fully-mocked dataset record for endpoint tests."""
     record = MagicMock()
     record.status = status

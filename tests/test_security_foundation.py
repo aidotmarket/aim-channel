@@ -221,7 +221,7 @@ class TestToolClassification:
     def test_read_only_tools(self):
         expected = {
             "list_datasets", "get_dataset_detail", "preview_rows",
-            "run_sql_query", "search_vectors", "get_system_status",
+            "run_sql_query", "get_system_status",
             "get_dataset_statistics", "connectivity_status",
             "get_notifications", "get_tunnel_status",
             "generate_diagnostic_bundle", "connectivity_test",

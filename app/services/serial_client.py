@@ -247,6 +247,34 @@ class SerialClient:
         error = data.get("detail", str(data)) if data else f"HTTP {status_code}"
         return {"success": False, "error": error, "status_code": status_code}
 
+    async def verify_s3_connection(
+        self,
+        serial: str,
+        install_token: str,
+        role_arn: str,
+        external_id: str,
+        bucket: str,
+        region: str,
+        prefix: Optional[str] = None,
+    ) -> dict:
+        """POST /api/v1/serials/{serial}/s3-connections/verify"""
+        status_code, data = await self._request(
+            "POST",
+            f"/api/v1/serials/{serial}/s3-connections/verify",
+            json={
+                "role_arn": role_arn,
+                "external_id": external_id,
+                "bucket": bucket,
+                "region": region,
+                "prefix": prefix,
+            },
+            headers={"Authorization": f"Bearer {install_token}"},
+        )
+        if status_code == 200 and data:
+            return {"success": True, **data}
+        error = data.get("detail", str(data)) if data else f"HTTP {status_code}"
+        return {"success": False, "error": error, "status_code": status_code}
+
     async def send_magic_link(self, serial: str, install_token: str, email: str) -> dict:
         """POST /api/v1/auth/magic-link"""
         import os

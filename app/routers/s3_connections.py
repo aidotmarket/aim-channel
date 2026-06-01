@@ -23,6 +23,8 @@ from app.models.s3_connection import S3Connection
 from app.models.s3_object_metadata import S3ObjectMetadata
 from app.models.s3_scan_job import S3ScanJob
 from app.services.s3_scan_service import S3ScanService
+from app.services.serial_client import SerialClient
+from app.services.serial_store import ACTIVE, DEGRADED, get_serial_store
 
 router = APIRouter()
 
@@ -266,6 +268,23 @@ def _get_connection_for_user(session, connection_id: str, user: AuthenticatedUse
     return connection
 
 
+def _require_serial() -> tuple[str, str]:
+    """Return (serial, install_token) or raise 409."""
+    store = get_serial_store()
+    state = store.state
+    if state.state not in (ACTIVE, DEGRADED):
+        raise HTTPException(
+            status_code=409,
+            detail="Serial not active. Connect to ai.market first.",
+        )
+    if not state.serial or not state.install_token:
+        raise HTTPException(
+            status_code=409,
+            detail="Missing serial credentials.",
+        )
+    return state.serial, state.install_token
+
+
 def _create_dataset_for_object(metadata: S3ObjectMetadata, body: S3ObjectRegisterRequest) -> DatasetRecord:
     now = datetime.now(timezone.utc)
     return DatasetRecord(
@@ -279,12 +298,6 @@ def _create_dataset_for_object(metadata: S3ObjectMetadata, body: S3ObjectRegiste
         created_at=now,
         updated_at=now,
     )
-
-
-def _boto3_client(service_name: str, **kwargs):
-    import boto3
-
-    return boto3.client(service_name, **kwargs)
 
 
 @router.get("/config", summary="Get S3 connection setup config")
@@ -365,42 +378,45 @@ async def verify_connection(
         if not connection.role_arn:
             raise HTTPException(status_code=400, detail="S3 connection role ARN is not configured")
 
-        try:
-            sts_client = _boto3_client("sts", region_name=connection.region)
-            assumed = sts_client.assume_role(
-                RoleArn=connection.role_arn,
-                RoleSessionName="aim-data-verify",
-                ExternalId=connection.external_id,
-            )
-            credentials = assumed["Credentials"]
-            s3_client = _boto3_client(
-                "s3",
-                region_name=connection.region,
-                aws_access_key_id=credentials["AccessKeyId"],
-                aws_secret_access_key=credentials["SecretAccessKey"],
-                aws_session_token=credentials["SessionToken"],
-            )
-            s3_client.list_objects_v2(
-                Bucket=connection.bucket,
-                Prefix=connection.prefix or "",
-                MaxKeys=1,
-            )
-        except Exception as exc:
+        def persist_error(message: str) -> S3VerifyResponse:
             connection.status = "error"
-            connection.error_message = str(exc)
+            connection.error_message = message
             connection.updated_at = datetime.now(timezone.utc)
             session.add(connection)
             session.commit()
             return S3VerifyResponse(status=connection.status, error_message=connection.error_message)
 
-        verified_at = datetime.now(timezone.utc)
+        try:
+            serial, install_token = _require_serial()
+        except HTTPException:
+            return persist_error("Connect this install to ai.market to verify S3 access.")
+
+        result = await SerialClient().verify_s3_connection(
+            serial,
+            install_token,
+            role_arn=connection.role_arn,
+            external_id=connection.external_id,
+            bucket=connection.bucket,
+            region=connection.region,
+            prefix=connection.prefix,
+        )
+
+        if not result.get("success") or result.get("status") != "verified":
+            message = result.get("error_message") or result.get("error") or "S3 connection verification failed"
+            return persist_error(message)
+
+        verified_at_raw = result.get("verified_at")
+        if verified_at_raw:
+            verified_at = datetime.fromisoformat(verified_at_raw.replace("Z", "+00:00"))
+        else:
+            verified_at = datetime.now(timezone.utc)
         connection.status = "verified"
         connection.last_scanned_at = verified_at
         connection.error_message = None
         connection.updated_at = verified_at
         session.add(connection)
         session.commit()
-        return S3VerifyResponse(status=connection.status, verified_at=verified_at.isoformat())
+        return S3VerifyResponse(status=connection.status, verified_at=verified_at_raw or verified_at.isoformat())
 
 
 @router.post("/{connection_id}/scan", summary="Scan S3 connection objects")

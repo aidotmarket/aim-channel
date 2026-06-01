@@ -210,3 +210,51 @@ class TestRefresh:
 
         assert result.success is True
         assert result.install_token == "vzit_refreshed"
+
+
+class TestVerifyS3Connection:
+    @pytest.mark.asyncio
+    async def test_verify_s3_connection_posts_broker_request(self, client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "status": "verified",
+            "error_message": None,
+            "verified_at": "2026-06-01T12:00:00Z",
+        }
+
+        with patch("httpx.AsyncClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.request = AsyncMock(return_value=mock_resp)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            result = await client.verify_s3_connection(
+                "VZ-test",
+                "vzit_test",
+                role_arn="arn:aws:iam::210987654321:role/aim-data",
+                external_id="external-123",
+                bucket="seller-bucket",
+                region="us-east-1",
+                prefix=None,
+            )
+
+        assert result == {
+            "success": True,
+            "status": "verified",
+            "error_message": None,
+            "verified_at": "2026-06-01T12:00:00Z",
+        }
+        mock_instance.request.assert_awaited_once_with(
+            "POST",
+            "https://test.ai.market/api/v1/serials/VZ-test/s3-connections/verify",
+            json={
+                "role_arn": "arn:aws:iam::210987654321:role/aim-data",
+                "external_id": "external-123",
+                "bucket": "seller-bucket",
+                "region": "us-east-1",
+                "prefix": None,
+            },
+            headers={"Authorization": "Bearer vzit_test"},
+        )

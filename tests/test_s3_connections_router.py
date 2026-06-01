@@ -1,12 +1,11 @@
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
+from types import SimpleNamespace
 from typing import Optional
 from uuid import uuid4
 
-import boto3
 import pytest
-from botocore.stub import Stubber
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.pool import StaticPool
@@ -98,67 +97,14 @@ def _configured_row(
     return connection
 
 
-def _stubbed_clients(connection: S3Connection, *, s3_error: bool = False):
-    sts_client = boto3.client(
-        "sts",
-        region_name=connection.region,
-        aws_access_key_id="test",
-        aws_secret_access_key="test",
-        aws_session_token="test",
-    )
-    s3_client = boto3.client(
-        "s3",
-        region_name=connection.region,
-        aws_access_key_id="test",
-        aws_secret_access_key="test",
-        aws_session_token="test",
-    )
-    sts_stubber = Stubber(sts_client)
-    s3_stubber = Stubber(s3_client)
-    sts_stubber.add_response(
-        "assume_role",
-        {
-            "Credentials": {
-                "AccessKeyId": "ASIAIOSFODNN7EXAMPLE",
-                "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-                "SessionToken": "session-token",
-                "Expiration": datetime.now(timezone.utc),
-            },
-            "AssumedRoleUser": {
-                "AssumedRoleId": "AROA123EXAMPLE:aim-data-verify",
-                "Arn": connection.role_arn,
-            },
-        },
-        {
-            "RoleArn": connection.role_arn,
-            "RoleSessionName": "aim-data-verify",
-            "ExternalId": connection.external_id,
-        },
-    )
-    if s3_error:
-        s3_stubber.add_client_error(
-            "list_objects_v2",
-            service_error_code="AccessDenied",
-            service_message="Access denied",
-            expected_params={
-                "Bucket": connection.bucket,
-                "Prefix": connection.prefix or "",
-                "MaxKeys": 1,
-            },
+def _serial_store(*, active: bool = True, serial: str = "VZ-test", install_token: Optional[str] = "vzit-test"):
+    return SimpleNamespace(
+        state=SimpleNamespace(
+            state="active" if active else "unprovisioned",
+            serial=serial,
+            install_token=install_token,
         )
-    else:
-        s3_stubber.add_response(
-            "list_objects_v2",
-            {"IsTruncated": False, "KeyCount": 1, "Contents": [{"Key": "exports/file.csv"}]},
-            {
-                "Bucket": connection.bucket,
-                "Prefix": connection.prefix or "",
-                "MaxKeys": 1,
-            },
-        )
-    sts_stubber.activate()
-    s3_stubber.activate()
-    return sts_client, s3_client, sts_stubber, s3_stubber
+    )
 
 
 def test_post_creates_row_and_returns_substituted_policies(client):
@@ -283,74 +229,94 @@ def test_put_role_arn_rejects_malformed_and_accepts_valid(client):
 
 def test_verify_success_sets_verified_and_last_scanned_at(client, s3_engine, monkeypatch):
     connection = _configured_row(s3_engine)
-    sts_client, s3_client, sts_stubber, s3_stubber = _stubbed_clients(connection)
+    captured = {}
 
-    monkeypatch.setattr(
-        s3_connections,
-        "_boto3_client",
-        lambda service_name, **_kwargs: sts_client if service_name == "sts" else s3_client,
-    )
+    class FakeSerialClient:
+        async def verify_s3_connection(self, serial, install_token, **kwargs):
+            captured["serial"] = serial
+            captured["install_token"] = install_token
+            captured["kwargs"] = kwargs
+            return {
+                "success": True,
+                "status": "verified",
+                "error_message": None,
+                "verified_at": "2026-06-01T12:00:00+00:00",
+            }
+
+    monkeypatch.setattr(s3_connections, "get_serial_store", lambda: _serial_store())
+    monkeypatch.setattr(s3_connections, "SerialClient", FakeSerialClient)
 
     response = client.post(f"/api/s3-connections/{connection.id}/verify")
 
     assert response.status_code == 200
     assert response.json()["status"] == "verified"
-    assert response.json()["verified_at"]
-    sts_stubber.assert_no_pending_responses()
-    s3_stubber.assert_no_pending_responses()
+    assert response.json()["verified_at"] == "2026-06-01T12:00:00+00:00"
+    assert captured == {
+        "serial": "VZ-test",
+        "install_token": "vzit-test",
+        "kwargs": {
+            "role_arn": connection.role_arn,
+            "external_id": connection.external_id,
+            "bucket": connection.bucket,
+            "region": connection.region,
+            "prefix": connection.prefix,
+        },
+    }
     with Session(s3_engine) as session:
         stored = session.get(S3Connection, connection.id)
         assert stored.status == "verified"
         assert stored.last_scanned_at is not None
 
 
-def test_verify_sts_failure_sets_error(client, s3_engine, monkeypatch):
+def test_verify_broker_error_sets_error(client, s3_engine, monkeypatch):
     connection = _configured_row(s3_engine)
-    sts_client = boto3.client(
-        "sts",
-        region_name=connection.region,
-        aws_access_key_id="test",
-        aws_secret_access_key="test",
-        aws_session_token="test",
-    )
-    sts_stubber = Stubber(sts_client)
-    sts_stubber.add_client_error(
-        "assume_role",
-        service_error_code="AccessDenied",
-        service_message="Cannot assume role",
-        expected_params={
-            "RoleArn": connection.role_arn,
-            "RoleSessionName": "aim-data-verify",
-            "ExternalId": connection.external_id,
-        },
-    )
-    sts_stubber.activate()
-    monkeypatch.setattr(s3_connections, "_boto3_client", lambda *_args, **_kwargs: sts_client)
+
+    class FakeSerialClient:
+        async def verify_s3_connection(self, *_args, **_kwargs):
+            return {
+                "success": True,
+                "status": "error",
+                "error_message": "Access denied by broker",
+                "verified_at": None,
+            }
+
+    monkeypatch.setattr(s3_connections, "get_serial_store", lambda: _serial_store())
+    monkeypatch.setattr(s3_connections, "SerialClient", FakeSerialClient)
 
     response = client.post(f"/api/s3-connections/{connection.id}/verify")
 
     assert response.status_code == 200
     assert response.json()["status"] == "error"
-    assert "Cannot assume role" in response.json()["error_message"]
-    sts_stubber.assert_no_pending_responses()
+    assert response.json()["error_message"] == "Access denied by broker"
+    with Session(s3_engine) as session:
+        stored = session.get(S3Connection, connection.id)
+        assert stored.status == "error"
+        assert stored.error_message == "Access denied by broker"
 
 
-def test_verify_s3_failure_after_sts_success_sets_error(client, s3_engine, monkeypatch):
+def test_verify_not_connected_sets_error_without_crashing(client, s3_engine, monkeypatch):
     connection = _configured_row(s3_engine)
-    sts_client, s3_client, sts_stubber, s3_stubber = _stubbed_clients(connection, s3_error=True)
-    monkeypatch.setattr(
-        s3_connections,
-        "_boto3_client",
-        lambda service_name, **_kwargs: sts_client if service_name == "sts" else s3_client,
-    )
+    client_called = False
+
+    class FakeSerialClient:
+        async def verify_s3_connection(self, *_args, **_kwargs):
+            nonlocal client_called
+            client_called = True
+            return {"success": True, "status": "verified", "verified_at": "2026-06-01T12:00:00+00:00"}
+
+    monkeypatch.setattr(s3_connections, "get_serial_store", lambda: _serial_store(active=False))
+    monkeypatch.setattr(s3_connections, "SerialClient", FakeSerialClient)
 
     response = client.post(f"/api/s3-connections/{connection.id}/verify")
 
     assert response.status_code == 200
     assert response.json()["status"] == "error"
-    assert "Access denied" in response.json()["error_message"]
-    sts_stubber.assert_no_pending_responses()
-    s3_stubber.assert_no_pending_responses()
+    assert response.json()["error_message"] == "Connect this install to ai.market to verify S3 access."
+    assert client_called is False
+    with Session(s3_engine) as session:
+        stored = session.get(S3Connection, connection.id)
+        assert stored.status == "error"
+        assert stored.error_message == "Connect this install to ai.market to verify S3 access."
 
 
 def test_user_cannot_get_scan_or_list_objects_on_foreign_connection(client, s3_engine, monkeypatch):

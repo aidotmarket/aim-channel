@@ -310,6 +310,32 @@ class SerialClient:
         error = data.get("detail", str(data)) if data else f"HTTP {status_code}"
         return {"success": False, "error": error, "status_code": status_code}
 
+    async def presign_object(
+        self,
+        serial: str,
+        install_token: str,
+        role_arn: str,
+        bucket: str,
+        region: str,
+        object_key: str,
+    ) -> dict:
+        """POST /api/v1/serials/{serial}/s3-connections/presign-object"""
+        status_code, data = await self._request(
+            "POST",
+            f"/api/v1/serials/{serial}/s3-connections/presign-object",
+            json={
+                "role_arn": role_arn,
+                "bucket": bucket,
+                "region": region,
+                "object_key": object_key,
+            },
+            headers={"Authorization": f"Bearer {install_token}"},
+        )
+        if status_code == 200 and data:
+            return {"success": True, **data}
+        error = data.get("detail", str(data)) if data else f"HTTP {status_code}"
+        return {"success": False, "error": error, "status_code": status_code}
+
     async def get_s3_external_id(self, serial: str, install_token: str) -> dict:
         """GET /api/v1/serials/{serial}/s3-connections/external-id"""
         status_code, data = await self._request(

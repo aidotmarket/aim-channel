@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import json
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from types import SimpleNamespace
@@ -18,7 +19,7 @@ from app.models.s3_connection import S3Connection
 from app.models.s3_object_metadata import S3ObjectMetadata  # noqa: F401
 from app.models.s3_scan_job import S3ScanJob  # noqa: F401
 from app.routers import s3_connections
-from app.services import s3_scan_service
+from app.services import s3_object_profiler, s3_scan_service
 
 USER_A = AuthenticatedUser(user_id="user-a", key_id="key-a", scopes=["read", "write"], valid=True)
 USER_B = AuthenticatedUser(user_id="user-b", key_id="key-b", scopes=["read", "write"], valid=True)
@@ -51,6 +52,7 @@ def client(s3_engine, monkeypatch):
 
     monkeypatch.setattr(s3_connections, "get_session_context", _session_context)
     monkeypatch.setattr(s3_scan_service, "get_session_context", _session_context)
+    monkeypatch.setattr(s3_object_profiler, "get_session_context", _session_context)
     monkeypatch.setattr(s3_connections.settings, "ai_market_aws_account_id", "123456789012")
     monkeypatch.setattr(s3_connections.settings, "ai_market_assume_role_principal_arn", None)
     app.dependency_overrides[get_current_user] = lambda: USER_A
@@ -328,6 +330,84 @@ def test_verify_not_connected_sets_error_without_crashing(client, s3_engine, mon
         stored = session.get(S3Connection, connection.id)
         assert stored.status == "error"
         assert stored.error_message == "Connect this install to ai.market to verify S3 access."
+
+
+def test_register_new_s3_object_starts_upload_pipeline(client, s3_engine, monkeypatch, tmp_path):
+    connection = _configured_row(s3_engine)
+    scan_job = S3ScanJob(id=str(uuid4()), connection_id=connection.id, status="completed")
+    obj = S3ObjectMetadata(
+        id=str(uuid4()),
+        connection_id=connection.id,
+        scan_job_id=scan_job.id,
+        object_key="exports/report.csv",
+        size_bytes=12,
+        content_type="text/csv",
+        last_modified=datetime.now(timezone.utc),
+        etag="etag",
+    )
+    with Session(s3_engine) as session:
+        session.add(scan_job)
+        session.add(obj)
+        session.commit()
+        session.refresh(obj)
+        object_id = obj.id
+
+    class FakePresignClient:
+        async def presign_object(self, serial, install_token, **kwargs):
+            assert serial == "VZ-test"
+            assert install_token == "vzit-test"
+            assert kwargs == {
+                "role_arn": connection.role_arn,
+                "bucket": connection.bucket,
+                "region": connection.region,
+                "object_key": "exports/report.csv",
+            }
+            return {"success": True, "url": "https://example.test/report.csv", "expires_at": "2026-06-01T12:15:00Z"}
+
+    submitted = []
+
+    class FakeQueue:
+        async def submit(self, dataset_id):
+            submitted.append(dataset_id)
+            return 1
+
+    async def fake_download(url, destination):
+        assert url == "https://example.test/report.csv"
+        assert destination.parent == tmp_path
+        return 12, b"name,age\n"
+
+    monkeypatch.setattr(s3_object_profiler.settings, "upload_directory", str(tmp_path))
+    monkeypatch.setattr(s3_object_profiler, "SerialClient", FakePresignClient)
+    monkeypatch.setattr(s3_object_profiler, "_download_presigned_url", fake_download)
+    monkeypatch.setattr(s3_object_profiler, "get_processing_queue", lambda: FakeQueue())
+
+    response = client.post(f"/api/s3-connections/{connection.id}/objects/{object_id}/register", json={})
+
+    assert response.status_code == 200
+    dataset = response.json()["dataset"]
+    assert dataset["status"] == "uploaded"
+    assert dataset["status"] not in ("s3_linked", "failed")
+    assert submitted == [dataset["id"]]
+
+    with Session(s3_engine) as session:
+        stored = session.get(DatasetRecord, dataset["id"])
+        metadata = session.get(S3ObjectMetadata, object_id)
+
+    assert stored.status == "uploaded"
+    assert stored.storage_filename == dataset["storage_filename"]
+    assert stored.storage_filename.endswith("_report.csv")
+    assert json.loads(stored.metadata_json)["s3_origin"] == {
+        "connection_id": connection.id,
+        "bucket": connection.bucket,
+        "region": connection.region,
+        "object_key": "exports/report.csv",
+    }
+    assert metadata.dataset_id == dataset["id"]
+
+    second = client.post(f"/api/s3-connections/{connection.id}/objects/{object_id}/register", json={})
+    assert second.status_code == 200
+    assert second.json()["dataset"]["id"] == dataset["id"]
+    assert submitted == [dataset["id"]]
 
 
 def test_user_cannot_get_scan_or_list_objects_on_foreign_connection(client, s3_engine, monkeypatch):

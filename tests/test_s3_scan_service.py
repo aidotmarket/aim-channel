@@ -277,7 +277,7 @@ async def test_scan_maps_metadata_and_never_fetches_object_bodies(session_contex
     assert metadata.content_type == "application/octet-stream"
 
 
-def test_register_endpoint_links_object_and_creates_dataset(client, session_context):
+def test_register_endpoint_links_object_and_creates_dataset(client, session_context, monkeypatch):
     connection = _add_connection(session_context)
     scan_job = S3ScanJob(id=str(uuid4()), connection_id=connection.id, status="completed")
     metadata = S3ObjectMetadata(
@@ -296,6 +296,20 @@ def test_register_endpoint_links_object_and_creates_dataset(client, session_cont
         session.add(metadata)
         session.commit()
 
+    profile_calls = []
+
+    async def fake_profile_registered_s3_object(**kwargs):
+        profile_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        s3_connections,
+        "get_serial_store",
+        lambda: SimpleNamespace(
+            state=SimpleNamespace(state="active", serial="VZ-test", install_token="vzit-test")
+        ),
+    )
+    monkeypatch.setattr(s3_connections, "profile_registered_s3_object", fake_profile_registered_s3_object)
+
     response = client.post(
         f"/api/s3-connections/{connection.id}/objects/{metadata_id}/register",
         json={"listing_id": "lst_123"},
@@ -306,10 +320,12 @@ def test_register_endpoint_links_object_and_creates_dataset(client, session_cont
     assert body["dataset"]["original_filename"] == "report.csv"
     assert body["dataset"]["file_type"] == "csv"
     assert body["dataset"]["file_size_bytes"] == 789
-    assert body["dataset"]["status"] == "s3_linked"
-    assert body["dataset"]["storage_filename"] == "exports/report.csv"
+    assert body["dataset"]["status"] == "uploaded"
+    assert body["dataset"]["storage_filename"].endswith("_report.csv")
     assert body["dataset"]["listing_id"] == "lst_123"
     assert body["object"]["dataset_id"] == body["dataset"]["id"]
+    assert len(profile_calls) == 1
+    assert profile_calls[0]["dataset_id"] == body["dataset"]["id"]
 
     second = client.post(
         f"/api/s3-connections/{connection.id}/objects/{metadata_id}/register",
@@ -317,6 +333,7 @@ def test_register_endpoint_links_object_and_creates_dataset(client, session_cont
     )
     assert second.status_code == 200
     assert second.json()["dataset"]["id"] == body["dataset"]["id"]
+    assert len(profile_calls) == 1
 
 
 def test_objects_endpoint_paginates_and_filters(client, session_context):

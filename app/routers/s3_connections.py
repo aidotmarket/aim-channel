@@ -8,23 +8,26 @@ Customer-facing S3 STS connection setup and verification endpoints.
 import os
 import re
 import uuid
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from app.auth.api_key_auth import AuthenticatedUser, get_current_user
 from app.config import settings
 from app.core.database import get_session_context
-from app.models.dataset import DatasetRecord
+from app.models.dataset import DatasetRecord, DatasetStatus
 from app.models.s3_connection import S3Connection
 from app.models.s3_object_metadata import S3ObjectMetadata
 from app.models.s3_scan_job import S3ScanJob
 from app.services.s3_scan_service import S3ScanService
+from app.services.s3_object_profiler import profile_registered_s3_object
 from app.services.serial_client import SerialClient
 from app.services.serial_store import ACTIVE, DEGRADED, get_serial_store
+from app.utils.sanitization import sanitize_filename
 
 router = APIRouter()
 
@@ -287,14 +290,26 @@ def _require_serial() -> tuple[str, str]:
 
 def _create_dataset_for_object(metadata: S3ObjectMetadata, body: S3ObjectRegisterRequest) -> DatasetRecord:
     now = datetime.now(timezone.utc)
+    dataset_id = body.dataset_id or str(uuid.uuid4())
+    original_filename = os.path.basename(metadata.object_key) or metadata.object_key
+    safe_name = sanitize_filename(original_filename)
+    storage_filename = f"{dataset_id}_{safe_name}"
     return DatasetRecord(
-        id=body.dataset_id or str(uuid.uuid4()),
-        original_filename=os.path.basename(metadata.object_key) or metadata.object_key,
-        storage_filename=metadata.object_key,
+        id=dataset_id,
+        original_filename=original_filename,
+        storage_filename=storage_filename,
         file_type=_dataset_file_type(metadata.object_key),
         file_size_bytes=metadata.size_bytes,
-        status="s3_linked",
+        status=DatasetStatus.UPLOADED.value,
         listing_id=body.listing_id,
+        metadata_json=json.dumps(
+            {
+                "s3_origin": {
+                    "connection_id": metadata.connection_id,
+                    "object_key": metadata.object_key,
+                },
+            }
+        ),
         created_at=now,
         updated_at=now,
     )
@@ -491,20 +506,24 @@ async def list_objects(
 async def register_object(
     connection_id: str,
     object_id: str,
+    background_tasks: BackgroundTasks,
     body: S3ObjectRegisterRequest,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> S3ObjectRegisterResponse:
     with get_session_context() as session:
-        _get_connection_for_user(session, connection_id, user)
+        connection = _get_connection_for_user(session, connection_id, user)
         metadata = session.get(S3ObjectMetadata, object_id)
         if metadata is None or metadata.connection_id != connection_id:
             raise HTTPException(status_code=404, detail="S3 object metadata not found")
 
         dataset: Optional[DatasetRecord] = None
+        created_dataset = False
         if body.dataset_id:
             dataset = session.get(DatasetRecord, body.dataset_id)
         elif body.listing_id:
             dataset = session.exec(select(DatasetRecord).where(DatasetRecord.listing_id == body.listing_id)).first()
+        if dataset is None and metadata.dataset_id:
+            dataset = session.get(DatasetRecord, metadata.dataset_id)
 
         if dataset is not None:
             # Ownership guard (S729 security review): an existing dataset may only be
@@ -520,10 +539,28 @@ async def register_object(
 
         if dataset is None:
             dataset = _create_dataset_for_object(metadata, body)
+            created_dataset = True
         else:
             dataset.updated_at = datetime.now(timezone.utc)
             if body.listing_id and not dataset.listing_id:
                 dataset.listing_id = body.listing_id
+
+        if created_dataset:
+            if not connection.role_arn:
+                raise HTTPException(status_code=400, detail="S3 connection role ARN is not configured")
+            serial, install_token = _require_serial()
+            origin = {
+                "connection_id": connection.id,
+                "bucket": connection.bucket,
+                "region": connection.region,
+                "object_key": metadata.object_key,
+            }
+            try:
+                dataset_meta = json.loads(dataset.metadata_json) if dataset.metadata_json else {}
+            except (TypeError, json.JSONDecodeError):
+                dataset_meta = {}
+            dataset_meta["s3_origin"] = origin
+            dataset.metadata_json = json.dumps(dataset_meta, default=str)
 
         session.add(dataset)
         session.flush()
@@ -534,6 +571,20 @@ async def register_object(
         session.commit()
         session.refresh(dataset)
         session.refresh(metadata)
+
+        if created_dataset:
+            background_tasks.add_task(
+                profile_registered_s3_object,
+                dataset_id=dataset.id,
+                serial=serial,
+                install_token=install_token,
+                role_arn=connection.role_arn,
+                bucket=connection.bucket,
+                region=connection.region,
+                object_key=metadata.object_key,
+                storage_filename=dataset.storage_filename,
+                file_type=dataset.file_type,
+            )
 
         return S3ObjectRegisterResponse(
             dataset=_dataset_response(dataset),

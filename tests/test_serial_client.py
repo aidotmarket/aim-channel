@@ -388,4 +388,55 @@ class TestListS3Objects:
             "bucket": "seller-bucket",
             "region": "us-east-1",
         }
+
+
+class TestPresignObject:
+    @pytest.mark.asyncio
+    async def test_presign_object_posts_broker_request(self, client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "url": "https://seller-bucket.s3.amazonaws.com/exports/a.csv?sig=1",
+            "bucket": "seller-bucket",
+            "object_key": "exports/a.csv",
+            "expires_in": 900,
+            "expires_at": "2026-06-01T12:15:00Z",
+        }
+
+        with patch("httpx.AsyncClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.request = AsyncMock(return_value=mock_resp)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            result = await client.presign_object(
+                "VZ-test",
+                "vzit_test",
+                role_arn="arn:aws:iam::210987654321:role/aim-data",
+                bucket="seller-bucket",
+                region="us-east-1",
+                object_key="exports/a.csv",
+            )
+
+        assert result == {
+            "success": True,
+            "url": "https://seller-bucket.s3.amazonaws.com/exports/a.csv?sig=1",
+            "bucket": "seller-bucket",
+            "object_key": "exports/a.csv",
+            "expires_in": 900,
+            "expires_at": "2026-06-01T12:15:00Z",
+        }
+        mock_instance.request.assert_awaited_once_with(
+            "POST",
+            "https://test.ai.market/api/v1/serials/VZ-test/s3-connections/presign-object",
+            json={
+                "role_arn": "arn:aws:iam::210987654321:role/aim-data",
+                "bucket": "seller-bucket",
+                "region": "us-east-1",
+                "object_key": "exports/a.csv",
+            },
+            headers={"Authorization": "Bearer vzit_test"},
+        )
+        sent_json = mock_instance.request.await_args.kwargs["json"]
         assert "external_id" not in sent_json

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { CheckCircle, ChevronLeft, ChevronRight, FileSearch, Loader2, Play, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -55,6 +56,9 @@ interface S3ObjectsResponse {
 }
 
 interface S3RegisterResponse {
+  dataset: {
+    id: string;
+  };
   object: S3ObjectMetadata;
 }
 
@@ -98,6 +102,7 @@ export function S3ConnectionReview({
   connection: S3ConnectionReviewConnection;
   onScanComplete?: () => void;
 }) {
+  const navigate = useNavigate();
   const [scanJob, setScanJob] = useState<S3ScanJob | null>(null);
   const [scanLoading, setScanLoading] = useState(false);
   const [scanError, setScanError] = useState("");
@@ -220,7 +225,12 @@ export function S3ConnectionReview({
     }
   };
 
-  const registerObject = async (objectId: string) => {
+  const listObject = async (object: S3ObjectMetadata): Promise<string | null> => {
+    if (object.dataset_id) {
+      return object.dataset_id;
+    }
+
+    const objectId = object.id;
     setRegisteringIds((currentIds) => new Set(currentIds).add(objectId));
     try {
       const response = await fetch(`${getApiUrl()}/api/s3-connections/${connection.id}/objects/${objectId}/register`, {
@@ -231,7 +241,8 @@ export function S3ConnectionReview({
       if (response.ok) {
         const data: S3RegisterResponse = await response.json();
         updateObject(data.object);
-        toast({ title: "Object registered", description: "The S3 object is ready for dataset fulfillment." });
+        toast({ title: "Dataset created", description: "Opening the listing flow for this S3 object." });
+        return data.dataset.id;
       } else if (response.status === 403) {
         toast({
           title: "Registration blocked",
@@ -250,12 +261,34 @@ export function S3ConnectionReview({
         return nextIds;
       });
     }
+    return null;
   };
 
-  const registerSelected = async () => {
-    const ids = Array.from(selectedIds);
-    for (const objectId of ids) {
-      await registerObject(objectId);
+  const listSingleObject = async (object: S3ObjectMetadata) => {
+    const datasetId = await listObject(object);
+    if (datasetId) {
+      navigate(`/datasets/${datasetId}`);
+    }
+  };
+
+  const listSelected = async () => {
+    const selectedObjects = objects.filter((object) => selectedIds.has(object.id));
+
+    if (selectedObjects.length === 1) {
+      await listSingleObject(selectedObjects[0]);
+      return;
+    }
+
+    let listedCount = 0;
+    for (const object of selectedObjects) {
+      const datasetId = await listObject(object);
+      if (datasetId) {
+        listedCount += 1;
+      }
+    }
+
+    if (listedCount > 0) {
+      navigate("/datasets");
     }
   };
 
@@ -301,7 +334,7 @@ export function S3ConnectionReview({
                 Scan {scanJob.status} · {scanJob.objects_enumerated} object{scanJob.objects_enumerated === 1 ? "" : "s"} found
               </span>
             ) : (
-              <span>{total} scanned object{total === 1 ? "" : "s"} available for review</span>
+              <span>{total} scanned object{total === 1 ? "" : "s"} available to list</span>
             )}
           </div>
         </div>
@@ -326,10 +359,10 @@ export function S3ConnectionReview({
           size="sm"
           className="gap-1.5"
           disabled={selectedIds.size === 0 || isRegisteringSelected}
-          onClick={registerSelected}
+          onClick={listSelected}
         >
           {isRegisteringSelected ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle className="h-3.5 w-3.5" />}
-          Register selected
+          List selected
         </Button>
         {selectedIds.size > 0 ? (
           <span className="text-xs text-muted-foreground">
@@ -396,11 +429,11 @@ export function S3ConnectionReview({
                       <Button
                         variant="outline"
                         size="sm"
-                        disabled={registered || registering}
-                        onClick={() => registerObject(object.id)}
+                        disabled={registering}
+                        onClick={() => listSingleObject(object)}
                       >
                         {registering ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : null}
-                        Register
+                        List
                       </Button>
                     </TableCell>
                   </TableRow>

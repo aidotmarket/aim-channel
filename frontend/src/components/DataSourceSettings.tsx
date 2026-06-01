@@ -468,9 +468,11 @@ export default function DataSourceSettings() {
           {step === 2 && current && (
             <div className="space-y-4">
               <ol className="list-decimal space-y-2 pl-5 text-sm text-foreground">
-                <li>In AWS Console &gt; IAM &gt; Roles &gt; Create role &gt; AWS account &gt; Another AWS account. Paste this account ID and the external ID below.</li>
-                <li>Copy this trust policy and paste it as the role&apos;s trust policy:</li>
-                <li>Attach this as an inline permission policy on the role:</li>
+                <li>In AWS Console &gt; IAM &gt; Roles &gt; Create role. Select &quot;AWS account&quot;, then &quot;Another AWS account&quot;, and paste the Account ID below.</li>
+                <li>Under Options, check &quot;Require external ID&quot;. The External ID field then appears; paste the External ID below into it. Leave &quot;Require MFA&quot; unchecked, then click Next. (Entering the account ID and external ID builds the trust relationship for you, so the Trust policy shown below is only for reference or for the &quot;Custom trust policy&quot; option.)</li>
+                <li>On the &quot;Add permissions&quot; step there is no box to paste a policy. Just click Next, give the role a name, and click Create role.</li>
+                <li>Open the role you just created, go to its Permissions tab, then Add permissions &gt; Create inline policy &gt; JSON, and paste the Permission policy below. Save it.</li>
+                <li>Copy the new role&apos;s ARN from the top of the role page. You&apos;ll enter it on the next step.</li>
               </ol>
               <PolicyBlock label="Account ID" value={accountBlock} />
               <PolicyBlock label="External ID" value={current.external_id || ""} />

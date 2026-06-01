@@ -1,7 +1,6 @@
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Optional
 from uuid import uuid4
 
 import pytest
@@ -19,7 +18,6 @@ from app.routers import s3_connections
 from app.services import fulfillment_service, s3_scan_service
 from app.services.fulfillment_service import FulfillmentService
 from app.services.s3_scan_service import S3ScanService
-from app.services.sts_broker import AssumedCredentials, STSAssumeError
 
 
 @pytest.fixture
@@ -58,34 +56,44 @@ def client(session_context):
     return TestClient(app)
 
 
-class FakeBroker:
-    def __init__(self, error: Optional[Exception] = None):
-        self.error = error
-        self.calls = []
-
-    def assume_role(self, connection, purpose: str):
-        self.calls.append((connection.id, purpose))
-        if self.error:
-            raise self.error
-        return AssumedCredentials(
-            access_key_id="access-key",
-            secret_access_key="secret-key",
-            session_token="session-token",
-            expiration=datetime.now(timezone.utc) + timedelta(hours=1),
-            region=connection.region,
-        )
-
-
-class FakeS3Client:
+class FakeSerialClient:
     def __init__(self, pages):
         self.pages = pages
         self.calls = []
 
-    def list_objects_v2(self, **kwargs):
-        self.calls.append(kwargs)
-        if "ContinuationToken" in kwargs:
+    async def list_s3_objects(self, serial, install_token, **kwargs):
+        self.calls.append(
+            {
+                "serial": serial,
+                "install_token": install_token,
+                **kwargs,
+            }
+        )
+        if kwargs.get("continuation_token"):
             return self.pages[1]
+        if self.calls and len(self.calls) > 1:
+            return self.pages[len(self.calls) - 1]
         return self.pages[0]
+
+
+class ExplodingObjectClient:
+    def get_object(self, **_kwargs):
+        raise AssertionError("scan must not fetch object bodies")
+
+    def list_objects_v2(self, **_kwargs):
+        raise AssertionError("scan must not use local boto3 listing")
+
+
+class FakeSerialClientWithObjectBodyMethods(FakeSerialClient):
+    def __init__(self, pages):
+        super().__init__(pages)
+        self.s3 = ExplodingObjectClient()
+
+    async def get_object(self, **_kwargs):
+        raise AssertionError("scan must not fetch object bodies")
+
+    async def download_fileobj(self, *_args, **_kwargs):
+        raise AssertionError("scan must not fetch object bodies")
 
 
 def _connection(**overrides) -> S3Connection:
@@ -116,40 +124,50 @@ def _add_connection(session_context, **overrides) -> S3Connection:
 
 def _page(*objects, truncated=False, token=None):
     response = {
-        "IsTruncated": truncated,
-        "Contents": list(objects),
+        "success": True,
+        "status": "listed",
+        "is_truncated": truncated,
+        "objects": list(objects),
+        "next_continuation_token": token,
+        "error_message": None,
     }
-    if token:
-        response["NextContinuationToken"] = token
     return response
 
 
 def _object(key: str, size: int = 123):
     return {
-        "Key": key,
-        "Size": size,
-        "ETag": '"etag"',
-        "LastModified": datetime(2026, 5, 29, tzinfo=timezone.utc),
+        "key": key,
+        "size": size,
+        "etag": '"etag"',
+        "last_modified": "2026-05-29T00:00:00Z",
+        "storage_class": "STANDARD",
     }
 
 
-def test_scan_persists_one_row_per_object(session_context, monkeypatch):
+@pytest.mark.asyncio
+async def test_scan_persists_one_row_per_object(session_context):
     connection = _add_connection(session_context)
-    s3_client = FakeS3Client(
+    serial_client = FakeSerialClient(
         [
             _page(_object("exports/a.csv"), truncated=True, token="next"),
             _page(_object("exports/b.json", 456)),
         ]
     )
-    monkeypatch.setattr(s3_scan_service, "_boto3_client", lambda *_args, **_kwargs: s3_client)
 
-    scan_job = S3ScanService(FakeBroker()).scan_connection(connection.id)
+    scan_job = await S3ScanService(serial_client).scan_connection(connection.id, "VZ-test", "vzit-test")
 
     assert scan_job.status == "completed"
     assert scan_job.objects_enumerated == 2
-    assert s3_client.calls[0]["Bucket"] == "seller-bucket"
-    assert s3_client.calls[0]["Prefix"] == "exports/"
-    assert s3_client.calls[1]["ContinuationToken"] == "next"
+    assert serial_client.calls[0] == {
+        "serial": "VZ-test",
+        "install_token": "vzit-test",
+        "role_arn": "arn:aws:iam::210987654321:role/aim-data",
+        "bucket": "seller-bucket",
+        "region": "us-east-1",
+        "prefix": "exports/",
+        "continuation_token": None,
+    }
+    assert serial_client.calls[1]["continuation_token"] == "next"
     with session_context() as session:
         objects = session.exec(select(S3ObjectMetadata).order_by(S3ObjectMetadata.object_key)).all()
         stored_connection = session.get(S3Connection, connection.id)
@@ -159,7 +177,8 @@ def test_scan_persists_one_row_per_object(session_context, monkeypatch):
     assert stored_connection.last_scanned_at is not None
 
 
-def test_rescan_is_idempotent_and_preserves_dataset_id(session_context, monkeypatch):
+@pytest.mark.asyncio
+async def test_rescan_is_idempotent_and_preserves_dataset_id(session_context):
     connection = _add_connection(session_context)
     dataset = DatasetRecord(
         id=str(uuid4()),
@@ -190,10 +209,9 @@ def test_rescan_is_idempotent_and_preserves_dataset_id(session_context, monkeypa
         )
         session.commit()
 
-    s3_client = FakeS3Client([_page(_object("exports/a.csv", 999))])
-    monkeypatch.setattr(s3_scan_service, "_boto3_client", lambda *_args, **_kwargs: s3_client)
+    serial_client = FakeSerialClient([_page(_object("exports/a.csv", 999))])
 
-    S3ScanService(FakeBroker()).scan_connection(connection.id)
+    await S3ScanService(serial_client).scan_connection(connection.id, "VZ-test", "vzit-test")
 
     with session_context() as session:
         objects = session.exec(select(S3ObjectMetadata)).all()
@@ -203,19 +221,60 @@ def test_rescan_is_idempotent_and_preserves_dataset_id(session_context, monkeypa
     assert objects[0].size_bytes == 999
 
 
-def test_scan_sts_error_marks_failed_without_raw_aws_internals(session_context):
+@pytest.mark.asyncio
+async def test_scan_broker_error_marks_failed_without_raw_detail(session_context):
     connection = _add_connection(session_context)
     raw = "An error occurred (AccessDenied) when calling the AssumeRole operation"
-    broker = FakeBroker(STSAssumeError("Confirm the trust policy and ExternalId.", "AccessDenied"))
+    serial_client = FakeSerialClient(
+        [
+            {
+                "success": True,
+                "status": "error",
+                "objects": [],
+                "next_continuation_token": None,
+                "is_truncated": False,
+                "error_message": "AccessDenied",
+            }
+        ]
+    )
 
-    scan_job = S3ScanService(broker).scan_connection(connection.id)
+    scan_job = await S3ScanService(serial_client).scan_connection(connection.id, "VZ-test", "vzit-test")
 
     assert scan_job.status == "failed"
-    assert "Confirm the trust policy" in scan_job.error_message
+    assert "AccessDenied" in scan_job.error_message
     assert raw not in scan_job.error_message
     with session_context() as session:
         stored = session.get(S3ScanJob, scan_job.id)
     assert stored.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_scan_maps_metadata_and_never_fetches_object_bodies(session_context):
+    connection = _add_connection(session_context)
+    serial_client = FakeSerialClientWithObjectBodyMethods(
+        [
+            _page(
+                {
+                    "key": "exports/report.parquet",
+                    "size": 2048,
+                    "last_modified": "2026-05-29T12:34:56+00:00",
+                    "storage_class": "STANDARD",
+                    "etag": '"metadata-etag"',
+                }
+            )
+        ]
+    )
+
+    scan_job = await S3ScanService(serial_client).scan_connection(connection.id, "VZ-test", "vzit-test")
+
+    assert scan_job.status == "completed"
+    with session_context() as session:
+        metadata = session.exec(select(S3ObjectMetadata)).one()
+    assert metadata.object_key == "exports/report.parquet"
+    assert metadata.size_bytes == 2048
+    assert metadata.last_modified.replace(tzinfo=timezone.utc) == datetime(2026, 5, 29, 12, 34, 56, tzinfo=timezone.utc)
+    assert metadata.etag == '"metadata-etag"'
+    assert metadata.content_type == "application/octet-stream"
 
 
 def test_register_endpoint_links_object_and_creates_dataset(client, session_context):

@@ -107,6 +107,17 @@ def _serial_store(*, active: bool = True, serial: str = "VZ-test", install_token
     )
 
 
+class DefaultSerialClient:
+    async def get_s3_external_id(self, *_args, **_kwargs):
+        return {"success": True, "external_id": "external-from-broker"}
+
+
+@pytest.fixture(autouse=True)
+def connected_serial(monkeypatch):
+    monkeypatch.setattr(s3_connections, "get_serial_store", lambda: _serial_store())
+    monkeypatch.setattr(s3_connections, "SerialClient", DefaultSerialClient)
+
+
 def test_post_creates_row_and_returns_substituted_policies(client):
     data = _create_connection(client)
 

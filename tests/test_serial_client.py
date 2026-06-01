@@ -258,3 +258,134 @@ class TestVerifyS3Connection:
             },
             headers={"Authorization": "Bearer vzit_test"},
         )
+
+
+class TestListS3Objects:
+    @pytest.mark.asyncio
+    async def test_list_s3_objects_posts_broker_request(self, client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "status": "listed",
+            "objects": [
+                {
+                    "key": "exports/a.csv",
+                    "size": 123,
+                    "last_modified": "2026-06-01T12:00:00Z",
+                    "storage_class": "STANDARD",
+                    "etag": '"etag"',
+                }
+            ],
+            "next_continuation_token": None,
+            "is_truncated": False,
+            "error_message": None,
+        }
+
+        with patch("httpx.AsyncClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.request = AsyncMock(return_value=mock_resp)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            result = await client.list_s3_objects(
+                "VZ-test",
+                "vzit_test",
+                role_arn="arn:aws:iam::210987654321:role/aim-data",
+                bucket="seller-bucket",
+                region="us-east-1",
+                prefix="exports/",
+                continuation_token="next-token",
+                max_keys=100,
+            )
+
+        assert result == {
+            "success": True,
+            "status": "listed",
+            "objects": [
+                {
+                    "key": "exports/a.csv",
+                    "size": 123,
+                    "last_modified": "2026-06-01T12:00:00Z",
+                    "storage_class": "STANDARD",
+                    "etag": '"etag"',
+                }
+            ],
+            "next_continuation_token": None,
+            "is_truncated": False,
+            "error_message": None,
+        }
+        mock_instance.request.assert_awaited_once_with(
+            "POST",
+            "https://test.ai.market/api/v1/serials/VZ-test/s3-connections/list-objects",
+            json={
+                "role_arn": "arn:aws:iam::210987654321:role/aim-data",
+                "bucket": "seller-bucket",
+                "region": "us-east-1",
+                "prefix": "exports/",
+                "continuation_token": "next-token",
+                "max_keys": 100,
+            },
+            headers={"Authorization": "Bearer vzit_test"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_list_s3_objects_error_response(self, client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 502
+        mock_resp.json.return_value = {"detail": "broker unavailable"}
+
+        with patch("httpx.AsyncClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.request = AsyncMock(return_value=mock_resp)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            result = await client.list_s3_objects(
+                "VZ-test",
+                "vzit_test",
+                role_arn="arn:aws:iam::210987654321:role/aim-data",
+                bucket="seller-bucket",
+                region="us-east-1",
+            )
+
+        assert result == {"success": False, "error": "broker unavailable", "status_code": 502}
+
+    @pytest.mark.asyncio
+    async def test_list_s3_objects_omits_none_fields_and_external_id(self, client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "status": "listed",
+            "objects": [],
+            "next_continuation_token": None,
+            "is_truncated": False,
+            "error_message": None,
+        }
+
+        with patch("httpx.AsyncClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.request = AsyncMock(return_value=mock_resp)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            await client.list_s3_objects(
+                "VZ-test",
+                "vzit_test",
+                role_arn="arn:aws:iam::210987654321:role/aim-data",
+                bucket="seller-bucket",
+                region="us-east-1",
+                prefix=None,
+                continuation_token=None,
+                max_keys=None,
+            )
+
+        sent_json = mock_instance.request.await_args.kwargs["json"]
+        assert sent_json == {
+            "role_arn": "arn:aws:iam::210987654321:role/aim-data",
+            "bucket": "seller-bucket",
+            "region": "us-east-1",
+        }
+        assert "external_id" not in sent_json

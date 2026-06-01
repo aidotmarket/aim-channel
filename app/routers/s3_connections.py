@@ -434,7 +434,8 @@ async def scan_connection(
     with get_session_context() as session:
         _get_connection_for_user(session, connection_id, user)
     try:
-        scan_job = S3ScanService().scan_connection(connection_id)
+        serial, install_token = _require_serial()
+        scan_job = await S3ScanService().scan_connection(connection_id, serial, install_token)
     except ValueError:
         raise HTTPException(status_code=404, detail="S3 connection not found") from None
     return _scan_job_response(scan_job)

@@ -1,6 +1,5 @@
 import { createContext, useContext, useState, useCallback, useRef, useEffect } from "react";
-import { datasetsApi, rawFilesApi, DuplicateFileError, UploadAbortedError, importApi } from "@/lib/api";
-import { useChannel } from "@/hooks/useChannel";
+import { rawFilesApi, UploadAbortedError, importApi } from "@/lib/api";
 import { toast } from "sonner";
 
 // ---------------------------------------------------------------------------
@@ -20,7 +19,7 @@ export interface QueuedFile {
   existingDatasetId: string | null;
   /** Backend queue position — reported by FileRow via onMetadataUpdate */
   queuePosition: number | null;
-  /** Processing phase: queued | extracting | indexing | null */
+  /** Processing phase reported by background processors, when present. */
   processingPhase: string | null;
 }
 
@@ -93,10 +92,6 @@ const JUNK_FILES = new Set([".DS_Store", "Thumbs.db", ".gitkeep", ".gitignore", 
 // ---------------------------------------------------------------------------
 
 export function UploadProvider({ children }: { children: React.ReactNode }) {
-  // ----- channel-aware behavior (aim-data = raw-files flow, no vectorization) -----
-  const channel = useChannel();
-  const isRawFlow = channel === "aim-data";
-
   // ----- queue -----
   const [queue, setQueue] = useState<QueuedFile[]>([]);
   const [isUploading, setIsUploading] = useState(false);
@@ -197,18 +192,9 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         return prev.map((f) => f.id === id ? { ...f, state: "error" as FileState, error: "Cancelled" } : f);
       }
 
-      if (item.state === "processing" && item.datasetId) {
-        // Fire-and-forget backend cancel
-        datasetsApi.delete(item.datasetId).catch(() => {});
-        return prev.map((f) => f.id === id ? { ...f, state: "error" as FileState, error: "Cancelled" } : f);
-      }
-
       return prev;
     });
   }, []);
-
-  // ----- batch -----
-  const batchIdRef = useRef<string | null>(null);
 
   const concurrentUploads = (() => {
     const stored = localStorage.getItem("vectoraiz_concurrent_uploads");
@@ -239,29 +225,14 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   const uploadOne = async (item: QueuedFile, allowDuplicate: boolean) => {
     updateFile(item.id, { state: "uploading", progress: 0 });
     try {
-      // AIM Data flow: raw upload, no vectorization, no processing phase.
-      if (isRawFlow) {
-        const { promise, abort } = rawFilesApi.uploadRawWithProgress(item.file, {
-          onProgress: (pct) => updateFile(item.id, { progress: pct }),
-        });
-        abortHandles.current.set(item.id, abort);
-        const result = await promise;
-        abortHandles.current.delete(item.id);
-        // raw_files are immediately "complete" — no server-side processing phase.
-        updateFile(item.id, { state: "complete", progress: 100, datasetId: result.id });
-        return "ok";
-      }
-
-      // VectorAIz flow: dataset upload with vectorization + processing pipeline.
-      const { promise, abort } = datasetsApi.uploadWithProgress(item.file, {
-        allowDuplicate,
-        batchId: batchIdRef.current ?? undefined,
+      void allowDuplicate;
+      const { promise, abort } = rawFilesApi.uploadRawWithProgress(item.file, {
         onProgress: (pct) => updateFile(item.id, { progress: pct }),
       });
       abortHandles.current.set(item.id, abort);
       const result = await promise;
       abortHandles.current.delete(item.id);
-      updateFile(item.id, { state: "processing", progress: 100, datasetId: result.dataset_id });
+      updateFile(item.id, { state: "complete", progress: 100, datasetId: result.id });
       return "ok";
     } catch (e) {
       abortHandles.current.delete(item.id);
@@ -269,28 +240,10 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         // cancelFile already set the state — just return
         return "cancelled";
       }
-      if (e instanceof DuplicateFileError) {
-        updateFile(item.id, { state: "duplicate", progress: 0, existingDatasetId: e.existingDataset.id, error: null });
-        return "duplicate";
-      }
       updateFile(item.id, { state: "error", error: e instanceof Error ? e.message : "Upload failed" });
       return "error";
     }
   };
-
-  const sendBatchSummary = useCallback(async (q: QueuedFile[]) => {
-    const bid = batchIdRef.current;
-    if (!bid) return;
-    const ok = q.filter((f) => f.state === "complete" || f.state === "processing").length;
-    const fail = q.filter((f) => f.state === "error" || f.state === "rejected").length;
-    if (ok + fail < 2) return;
-    const failedNames = q.filter((f) => f.state === "error" || f.state === "rejected").map((f) => f.file.name);
-    try {
-      await datasetsApi.uploadBatchSummary(bid, ok, fail, failedNames);
-    } catch {
-      // best-effort
-    }
-  }, []);
 
   const handleUploadAll = useCallback(async () => {
     const pending = queue.filter((f) => f.state === "pending");
@@ -301,7 +254,6 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     }
     setShowLargeWarning(false);
     setIsUploading(true);
-    batchIdRef.current = `upl_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
     await runWithConcurrency(pending, (item) => uploadOne(item, false), concurrentUploads);
     setIsUploading(false);
   }, [queue, showLargeWarning, concurrentUploads]);
@@ -317,45 +269,6 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     setQueue((prev) => prev.filter((f) => f.state !== "duplicate"));
   }, []);
 
-  // ----- poll processing items even when modal is closed -----
-  const processingKey = queue
-    .filter((f) => f.state === "processing" && f.datasetId)
-    .map((f) => f.datasetId)
-    .join(",");
-
-  useEffect(() => {
-    if (!processingKey) return;
-
-    const interval = setInterval(async () => {
-      const processingItems = queue.filter((f) => f.state === "processing" && f.datasetId);
-      for (const item of processingItems) {
-        if (!item.datasetId) continue;
-        try {
-          const data = await datasetsApi.getStatus(item.datasetId);
-          if (data.status === "ready" || data.status === "preview_ready") {
-            handleStatusChange(item.id, "complete");
-          } else if (data.status === "error") {
-            handleStatusChange(item.id, "error", data.error || "Processing failed");
-          }
-          // Update phase/queuePosition metadata for the indicator
-          const raw = data as Record<string, unknown>;
-          if (raw.phase !== undefined || raw.queue_position !== undefined) {
-            handleMetadataUpdate(
-              item.id,
-              (raw.phase as string) ?? null,
-              (raw.queue_position as number) ?? null,
-            );
-          }
-        } catch {
-          // Ignore network errors, retry next interval
-        }
-      }
-    }, 3000);
-
-    return () => clearInterval(interval);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [processingKey]);
-
   // ----- allDone effect: summary toast + auto-clear -----
   useEffect(() => {
     if (!allDone || queue.length === 0) return;
@@ -364,8 +277,6 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     const cancelled = queue.filter((f) => f.state === "error" && f.error === "Cancelled").length;
     const fail = queue.filter((f) => f.state === "error" && f.error !== "Cancelled").length;
     const skipped = queue.filter((f) => f.state === "rejected").length;
-
-    sendBatchSummary(queue);
 
     const parts: string[] = [];
     if (ok > 0) parts.push(`${ok} succeeded`);

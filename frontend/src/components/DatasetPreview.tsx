@@ -91,8 +91,8 @@ export default function DatasetPreview({ datasetId }: DatasetPreviewProps) {
     try {
       await datasetsApi.confirm(datasetId);
       toast({
-        title: "Indexing started",
-        description: "Your dataset is now being indexed. This may take a moment.",
+        title: "Dataset confirmed",
+        description: "Your dataset profile is ready for review and listing.",
       });
       // Re-fetch parent page to show processing state
       window.location.reload();
@@ -185,7 +185,7 @@ export default function DatasetPreview({ datasetId }: DatasetPreviewProps) {
             Data Preview
           </h2>
           <p className="text-sm text-muted-foreground">
-            Review your data before indexing
+            Review your data profile before listing
           </p>
         </div>
         <Badge

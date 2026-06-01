@@ -5,7 +5,6 @@
  * - preview_rows / run_sql_query: styled data table
  * - list_datasets: formatted dataset list
  * - get_dataset_detail / get_dataset_statistics: detail cards
- * - search_vectors: search results list
  * - get_system_status: status card
  * - errors: error message
  *
@@ -41,8 +40,6 @@ export default memo(function ToolResultRenderer({ toolName, data }: ToolResultRe
       return <DatasetDetail data={data} />;
     case "get_dataset_statistics":
       return <StatisticsTable data={data} />;
-    case "search_vectors":
-      return <SearchResults data={data} />;
     case "get_system_status":
       return <SystemStatus data={data} />;
     case "create_artifact":
@@ -121,7 +118,7 @@ function DatasetList({ data }: { data: ToolResultData }) {
               {ds.columns ? `${ds.columns} cols` : ""}
               {" · "}
               <span className={
-                ds.status === "ready" ? "text-green-600" :
+                ds.status === "preview_ready" ? "text-green-600" :
                 ds.status === "error" ? "text-red-600" :
                 "text-yellow-600"
               }>
@@ -184,29 +181,6 @@ function StatisticsTable({ data }: { data: ToolResultData }) {
           ))}
         </tbody>
       </table>
-    </div>
-  );
-}
-
-function SearchResults({ data }: { data: ToolResultData }) {
-  const results = data.results as Array<Record<string, unknown>> | undefined;
-  if (!results || results.length === 0) {
-    return <div className="my-2 text-xs text-muted-foreground italic">No search results found.</div>;
-  }
-
-  return (
-    <div className="my-2 space-y-1">
-      {results.map((r, i) => (
-        <div key={i} className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs">
-          <div className="flex items-center gap-2">
-            <span className="text-primary/60 font-mono text-[10px]">{((r.score as number) * 100).toFixed(1)}%</span>
-            <span className="text-muted-foreground">{r.dataset_name as string}</span>
-          </div>
-          {r.text_content && (
-            <div className="mt-1 text-foreground/70 line-clamp-2">{r.text_content as string}</div>
-          )}
-        </div>
-      ))}
     </div>
   );
 }

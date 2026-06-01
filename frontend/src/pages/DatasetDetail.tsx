@@ -50,7 +50,6 @@ import {
 import { type ColumnSchema, type Dataset } from "@/types/mockDatasets";
 import { toast } from "@/hooks/use-toast";
 import PublishModal from "@/components/PublishModal";
-import DatasetPreview from "@/components/DatasetPreview";
 import { useMarketplace } from "@/contexts/MarketplaceContext";
 import { useMode } from "@/contexts/ModeContext";
 import { useChannel } from "@/hooks/useChannel";
@@ -108,8 +107,7 @@ const mapApiDatasetToFrontend = (apiDataset: ApiDataset): Dataset => ({
   id: apiDataset.id,
   name: apiDataset.original_filename,
   type: apiDataset.file_type as "csv" | "xlsx" | "json" | "pdf" | "parquet",
-  status: apiDataset.status === "ready" ? "ready" as const
-    : apiDataset.status === "error" ? "error" as const
+  status: apiDataset.status === "error" ? "error" as const
     : apiDataset.status === "preview_ready" ? "preview_ready" as const
     : apiDataset.status === "cancelled" ? "error" as const
     : "processing" as const,
@@ -343,19 +341,12 @@ const DatasetDetail = () => {
                 )}
               </div>
               <div className="flex items-center gap-3 mt-1">
-                {dataset.status === "ready" ? (
+                {dataset.status === "preview_ready" ? (
                   <Badge
                     variant="secondary"
                     className="bg-haven-success/20 text-haven-success border-haven-success/30"
                   >
                     Ready
-                  </Badge>
-                ) : dataset.status === "preview_ready" ? (
-                  <Badge
-                    variant="secondary"
-                    className="bg-primary/20 text-primary border-primary/30"
-                  >
-                    Preview Ready
                   </Badge>
                 ) : dataset.status === "error" ? (
                   <Badge
@@ -385,17 +376,18 @@ const DatasetDetail = () => {
             </div>
           </div>
 
-          {dataset.status !== "preview_ready" && (
           <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => navigate(`/sql?dataset=${dataset.id}`)}
-            >
-              <Code className="w-4 h-4 mr-2" />
-              Query
-            </Button>
-            {hasFeature("marketplace") && dataset.status === "ready" && !datasetIsPublished && (
+            {dataset.status === "preview_ready" && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigate(`/sql?dataset=${dataset.id}`)}
+              >
+                <Code className="w-4 h-4 mr-2" />
+                Query
+              </Button>
+            )}
+            {hasFeature("marketplace") && dataset.status === "preview_ready" && !datasetIsPublished && (
               <Button
                 variant={channel === "marketplace" || channel === "aim-data" ? "default" : "ghost"}
                 size="sm"
@@ -413,7 +405,6 @@ const DatasetDetail = () => {
               Delete
             </Button>
           </div>
-          )}
         </div>
       </div>
 
@@ -451,13 +442,8 @@ const DatasetDetail = () => {
         </Card>
       )}
 
-      {/* Preview UI for preview_ready status */}
+      {/* Tabs — only shown when dataset is available */}
       {dataset.status === "preview_ready" && (
-        <DatasetPreview datasetId={dataset.id} />
-      )}
-
-      {/* Tabs — only shown when dataset is fully ready */}
-      {dataset.status === "ready" && (
       <Tabs defaultValue="overview" className="space-y-6">
         <TabsList className="bg-secondary">
           <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -572,7 +558,7 @@ const DatasetDetail = () => {
             </Card>
           </div>
 
-          {dataset.status === "ready" && (
+          {dataset.status === "preview_ready" && (
             <Card className="bg-card border-border">
               <CardContent className="py-4">
                 <p className="text-sm text-muted-foreground">

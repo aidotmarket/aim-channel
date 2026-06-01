@@ -163,7 +163,7 @@ export function useDatasetStatus(id: string, pollInterval = 2000) {
           setQueuePosition(res.queue_position ?? null);
 
           // Stop polling when done or awaiting user action
-          if (res.status === 'ready' || res.status === 'error' || res.status === 'preview_ready' || res.status === 'cancelled') {
+          if (res.status === 'error' || res.status === 'preview_ready' || res.status === 'cancelled') {
             return;
           }
         }

@@ -120,7 +120,7 @@ export interface ApiDataset {
   id: string;
   original_filename: string;
   file_type: string;
-  status: 'uploaded' | 'extracting' | 'preview_ready' | 'indexing' | 'ready' | 'cancelled' | 'error' | 'uploading' | 'processing';
+  status: 'uploaded' | 'extracting' | 'preview_ready' | 'cancelled' | 'error' | 'uploading' | 'processing';
   error?: string;
   created_at: string;
   updated_at: string;
@@ -129,7 +129,6 @@ export interface ApiDataset {
     column_count?: number;
     columns?: Array<{ name: string; type: string }>;
     size_bytes?: number;
-    index_status?: { status: string; rows_indexed?: number };
     pii_scan?: { overall_risk: string; columns_with_pii: number };
   };
 }
@@ -728,7 +727,7 @@ export const rawFilesApi = {
   /**
    * AIM Data raw upload with progress + abort.
    * Mirrors datasetsApi.uploadWithProgress but posts to /api/raw/files/upload.
-   * Used by the aim-data channel in UploadContext (no vectorization).
+   * Used by UploadContext for raw file registration.
    */
   uploadRawWithProgress: (
     file: File,

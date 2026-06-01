@@ -78,7 +78,6 @@ export interface PortalDataset {
   name: string;
   description: string | null;
   row_count: number;
-  searchable_columns: string[];
 }
 
 export interface PortalSSOUserInfo {

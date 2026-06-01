@@ -101,7 +101,11 @@ const convertApiDataset = (apiDataset: ApiDataset): Dataset => ({
   columns: apiDataset.metadata?.column_count || 0,
   size: formatBytes(apiDataset.metadata?.size_bytes),
   sizeBytes: apiDataset.metadata?.size_bytes || 0,
-  status: apiDataset.status === 'ready' ? 'ready' : 'processing',
+  status: apiDataset.status === 'preview_ready'
+    ? 'preview_ready'
+    : apiDataset.status === 'error' || apiDataset.status === 'cancelled'
+      ? 'error'
+      : 'processing',
   modifiedAt: new Date(apiDataset.updated_at),
   createdAt: new Date(apiDataset.created_at),
   processingTime: 0,
@@ -109,7 +113,7 @@ const convertApiDataset = (apiDataset: ApiDataset): Dataset => ({
 
 const Datasets = () => {
   const channel = useChannel();
-  // AIM Data channel: render the raw-listings page instead — no vectorization, any file type.
+  // AIM Data channel: render the raw-listings page for any file type.
   if (channel === "aim-data") {
     return <RawListingsPage />;
   }
@@ -142,7 +146,7 @@ const Datasets = () => {
     setOnSuccess(() => {
       toast({
         title: "Dataset uploaded successfully",
-        description: "Your file has been processed and is ready to use.",
+        description: "Your file has been profiled and is ready to use.",
       });
       refetch();
     });
@@ -385,7 +389,7 @@ const Datasets = () => {
                               Published
                             </Badge>
                           )}
-                          {dataset.status === "ready" ? (
+                          {dataset.status === "preview_ready" ? (
                             <Badge
                               variant="secondary"
                               className="bg-haven-success/20 text-haven-success border-haven-success/30"
@@ -501,7 +505,7 @@ const Datasets = () => {
                         <TableCell>{dataset.columns}</TableCell>
                         <TableCell>{dataset.size}</TableCell>
                         <TableCell>
-                          {dataset.status === "ready" ? (
+                          {dataset.status === "preview_ready" ? (
                             <Badge
                               variant="secondary"
                               className="bg-haven-success/20 text-haven-success border-haven-success/30"

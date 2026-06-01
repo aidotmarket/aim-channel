@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useRef } from "react";
 import { useDropzone } from "react-dropzone";
 import {
   Dialog,
@@ -25,10 +25,8 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useDatasetStatus } from "@/hooks/useApi";
 import { LocalImportBrowser } from "@/components/LocalImportBrowser";
 import { useUpload, type QueuedFile, type FileState } from "@/contexts/UploadContext";
-import { useChannel } from "@/hooks/useChannel";
 import { useState } from "react";
 
 const getFileIcon = (fileName: string) => {
@@ -58,56 +56,7 @@ const formatFileSize = (bytes: number) => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
-const ACCEPT_MAP = {
-  "text/csv": [".csv"],
-  "text/tab-separated-values": [".tsv"],
-  "application/json": [".json"],
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
-  "application/vnd.ms-excel": [".xls"],
-  "application/x-parquet": [".parquet"],
-  "application/pdf": [".pdf"],
-  "application/msword": [".doc"],
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation": [".pptx"],
-  "application/vnd.ms-powerpoint": [".ppt"],
-  "text/plain": [".txt", ".md", ".ics", ".vcf"],
-  "text/html": [".html"],
-  "application/rtf": [".rtf"],
-  "application/vnd.oasis.opendocument.text": [".odt"],
-  "application/vnd.oasis.opendocument.spreadsheet": [".ods"],
-  "application/vnd.oasis.opendocument.presentation": [".odp"],
-  "application/epub+zip": [".epub"],
-  "message/rfc822": [".eml"],
-  "application/vnd.ms-outlook": [".msg"],
-  "application/mbox": [".mbox"],
-  "application/xml": [".xml", ".rss"],
-  "application/vnd.apple.pages": [".pages"],
-  "application/vnd.apple.numbers": [".numbers"],
-  "application/vnd.apple.keynote": [".key"],
-  "application/vnd.ms-works": [".wps"],
-  "application/wordperfect": [".wpd"],
-};
-
-/** Tracks processing status for a single dataset after upload */
-function useProcessingTracker(datasetId: string | null, onReady: () => void, onError: (msg: string) => void) {
-  const { status, error, progressPct, progressDetail, phase, queuePosition } = useDatasetStatus(datasetId || "");
-  const firedRef = useRef(false);
-
-  useEffect(() => {
-    if (!datasetId || firedRef.current) return;
-    if (status === "ready" || status === "preview_ready") {
-      firedRef.current = true;
-      onReady();
-    } else if (status === "error") {
-      firedRef.current = true;
-      onError(error || "Processing failed");
-    }
-  }, [status, error, datasetId]);
-
-  return { status, progressPct, progressDetail, phase, queuePosition };
-}
-
-/** Individual file row that self-tracks processing */
+/** Individual file row */
 function FileRow({ item, onRemove, onCancel, onStatusChange, onMetadataUpdate }: {
   item: QueuedFile;
   onRemove: (id: string) => void;
@@ -116,19 +65,8 @@ function FileRow({ item, onRemove, onCancel, onStatusChange, onMetadataUpdate }:
   onMetadataUpdate: (id: string, phase: string | null, queuePosition: number | null) => void;
 }) {
   const Icon = getFileIcon(item.file.name);
-
-  const proc = useProcessingTracker(
-    item.state === "processing" ? item.datasetId : null,
-    () => onStatusChange(item.id, "complete"),
-    (msg) => onStatusChange(item.id, "error", msg),
-  );
-
-  // Report phase + queuePosition changes up to parent for sorting
-  useEffect(() => {
-    if (item.state === "processing") {
-      onMetadataUpdate(item.id, proc.phase ?? null, proc.queuePosition ?? null);
-    }
-  }, [proc.phase, proc.queuePosition, item.state]);
+  void onStatusChange;
+  void onMetadataUpdate;
 
   return (
     <div className={cn(
@@ -160,12 +98,7 @@ function FileRow({ item, onRemove, onCancel, onStatusChange, onMetadataUpdate }:
         <p className="text-xs text-muted-foreground">
           {item.state === "pending" && formatFileSize(item.file.size)}
           {item.state === "uploading" && `Uploading\u2026 ${Math.round(item.progress)}%`}
-          {item.state === "processing" && (
-            proc.phase === "queued" ? `Queued (#${proc.queuePosition ?? "?"})` :
-            proc.phase === "extracting" ? `Extracting\u2026 ${Math.round(proc.progressPct)}%${proc.progressDetail ? ` \u2014 ${proc.progressDetail}` : ""}` :
-            proc.phase === "indexing" ? `Indexing\u2026 ${Math.round(proc.progressPct)}%${proc.progressDetail ? ` \u2014 ${proc.progressDetail}` : ""}` :
-            "Processing\u2026"
-          )}
+          {item.state === "processing" && "Profiling\u2026"}
           {item.state === "complete" && "Ready"}
           {item.state === "error" && (item.error || "Failed")}
           {item.state === "rejected" && (item.error || "Skipped")}
@@ -182,7 +115,7 @@ function FileRow({ item, onRemove, onCancel, onStatusChange, onMetadataUpdate }:
       {(item.state === "uploading" || item.state === "processing") && (
         <div className="flex items-center gap-2">
           <div className="w-12">
-            <Progress value={item.state === "processing" ? proc.progressPct : item.progress} className="h-1" />
+            <Progress value={item.progress} className="h-1" />
           </div>
           <button onClick={() => onCancel(item.id)} className="p-1 text-muted-foreground hover:text-destructive rounded transition-colors" title="Cancel">
             <X className="w-3.5 h-3.5" />
@@ -260,13 +193,10 @@ const FileUploadModal = () => {
     addFiles(acceptedFiles, hasPaths ? paths : undefined);
   }, [addFiles]);
 
-  const channel = useChannel();
-  const isRawFlow = channel === "aim-data";
-
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    // AIM Data accepts any file type — listings don't require processable formats.
-    accept: isRawFlow ? undefined : ACCEPT_MAP,
+    // AIM Data accepts any file type for raw file listings.
+    accept: undefined,
     multiple: true,
   });
 
@@ -290,7 +220,7 @@ const FileUploadModal = () => {
   /**
    * Sort queue for display:
    * 1. uploading (active upload)
-   * 2. processing — actively extracting/indexing (not queued)
+   * 2. processing — actively profiling (not queued)
    * 3. processing — queued, sorted by queuePosition ascending
    * 4. pending (not yet uploaded)
    * 5. duplicate

@@ -15,7 +15,7 @@ export interface Dataset {
   id: string;
   name: string;
   type: "csv" | "xlsx" | "json" | "pdf" | "parquet";
-  status: "ready" | "processing" | "error" | "preview_ready";
+  status: "preview_ready" | "processing" | "error";
   rows: number;
   columns: number;
   size: string;

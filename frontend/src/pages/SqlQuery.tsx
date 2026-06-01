@@ -168,7 +168,7 @@ const SqlQuery = () => {
 
   // Get datasets list from API
   const datasets = datasetsData?.datasets
-    ?.filter(d => d.status === 'ready')
+    ?.filter(d => d.status === 'preview_ready')
     ?.map(d => ({ id: d.id, name: d.original_filename })) || [];
 
   // Get schema columns from selected dataset API response

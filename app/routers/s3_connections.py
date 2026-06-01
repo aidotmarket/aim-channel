@@ -312,6 +312,13 @@ async def create_connection(
     body: S3ConnectionCreate,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> S3ConnectionResponse:
+    serial, install_token = _require_serial()
+    ext = await SerialClient().get_s3_external_id(serial, install_token)
+    if not ext.get("success") or not ext.get("external_id"):
+        raise HTTPException(
+            status_code=502,
+            detail="Could not obtain a verified External ID from ai.market. Ensure this install is connected, then try again.",
+        )
     connection = S3Connection(
         id=str(uuid.uuid4()),
         owner_id=user.user_id,
@@ -319,7 +326,7 @@ async def create_connection(
         bucket=body.bucket,
         region=body.region,
         prefix=body.prefix or None,
-        external_id=str(uuid.uuid4()),
+        external_id=ext["external_id"],
         status="onboarding",
     )
     with get_session_context() as session:

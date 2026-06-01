@@ -10,12 +10,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useUpload } from "@/contexts/UploadContext";
 
 const ListDataPage = () => {
   const { openModal } = useUpload();
   const [provider, setProvider] = useState("aws");
+  const [view, setView] = useState<"upload" | "external">("upload");
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
@@ -26,19 +26,27 @@ const ListDataPage = () => {
         </p>
       </div>
 
-      <Tabs defaultValue="upload" className="space-y-6">
-        <TabsList className="bg-secondary">
-          <TabsTrigger value="upload" className="gap-2">
-            <Upload className="h-4 w-4" />
-            Upload a file
-          </TabsTrigger>
-          <TabsTrigger value="external" className="gap-2">
-            <Cloud className="h-4 w-4" />
-            Serve from another location
-          </TabsTrigger>
-        </TabsList>
+      <div className="flex flex-wrap gap-3">
+        <Button
+          variant={view === "upload" ? "default" : "outline"}
+          className="gap-2"
+          onClick={() => setView("upload")}
+        >
+          <Upload className="h-4 w-4" />
+          Upload a file
+        </Button>
+        <Button
+          variant={view === "external" ? "default" : "outline"}
+          className="gap-2"
+          onClick={() => setView("external")}
+        >
+          <Cloud className="h-4 w-4" />
+          Serve from the cloud
+        </Button>
+      </div>
 
-        <TabsContent value="upload" className="space-y-4">
+      {view === "upload" ? (
+        <div className="space-y-4">
           <Card className="bg-card border-border">
             <CardHeader>
               <CardTitle>Upload a file</CardTitle>
@@ -53,12 +61,12 @@ const ListDataPage = () => {
               </Button>
             </CardContent>
           </Card>
-        </TabsContent>
-
-        <TabsContent value="external" className="space-y-4">
+        </div>
+      ) : (
+        <div className="space-y-4">
           <Card className="bg-card border-border">
             <CardHeader>
-              <CardTitle>Serve from another location</CardTitle>
+              <CardTitle>Serve from the cloud</CardTitle>
               <CardDescription>
                 Connect a source that remains hosted in your cloud account.
               </CardDescription>
@@ -82,8 +90,8 @@ const ListDataPage = () => {
           </Card>
 
           {provider === "aws" ? <DataSourceSettings /> : null}
-        </TabsContent>
-      </Tabs>
+        </div>
+      )}
     </div>
   );
 };

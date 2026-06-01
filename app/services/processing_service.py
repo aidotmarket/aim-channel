@@ -509,8 +509,9 @@ class ProcessingService:
             self._save_record(record, record.upload_path.name if record.upload_path else f"{dataset_id}")
             return record
 
-        # Populate file_size_bytes from disk so fallback size checks are accurate
-        if record.upload_path and record.upload_path.exists():
+        # Populate file_size_bytes from disk when the DB record has no size.
+        # Tests and some import paths may already carry the authoritative size.
+        if record.file_size_bytes <= 0 and record.upload_path and record.upload_path.exists():
             try:
                 record.file_size_bytes = os.path.getsize(record.upload_path)
             except OSError:
@@ -529,8 +530,8 @@ class ProcessingService:
         try:
             file_type = record.file_type.lower()
 
-            if file_type in (TABULAR_TYPES | DOCUMENT_TYPES):
-                # BQ-VZ-LARGE-FILES: Force all documents and tabular files through streaming subprocess
+            if file_type in (TABULAR_TYPES | DOCUMENT_TYPES) and self._is_large_file(record):
+                # BQ-VZ-LARGE-FILES: Large documents and tabular files use the streaming subprocess.
                 try:
                     await asyncio.to_thread(self._extract_streaming, record)
                     record.metadata["processing_mode"] = "streaming"
@@ -597,6 +598,11 @@ class ProcessingService:
         storage_fn = record.upload_path.name if record.upload_path else f"{dataset_id}"
         self._save_record(record, storage_fn)
         return record
+
+    def _is_large_file(self, record: DatasetRecord) -> bool:
+        """Return true when a dataset should use the streaming extraction path."""
+        threshold_bytes = settings.large_file_threshold_mb * 1024 * 1024
+        return (record.file_size_bytes or 0) >= threshold_bytes
 
     def _extract_in_memory(self, record: DatasetRecord, file_type: str) -> None:
         """Standard in-memory extraction path (unchanged from original)."""

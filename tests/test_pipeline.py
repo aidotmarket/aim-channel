@@ -91,6 +91,12 @@ def pipeline_service(pipeline_dir, sample_csv):
             "overall_risk": "none",
             "total_pii_findings": 0,
         }
+        svc.pii_service.scan_structured.return_value = {
+            "columns": {},
+            "column_results": [],
+            "overall_risk": "none",
+            "total_pii_findings": 0,
+        }
         svc.compliance_service.generate_compliance_report = AsyncMock(
             return_value={"flags": [], "compliance_score": 100}
         )

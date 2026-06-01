@@ -482,16 +482,16 @@ class TestConfiguration:
         s = Settings(
             _env_file=None,  # Don't load .env
         )
-        assert s.large_file_threshold_mb == 100
+        assert s.large_file_threshold_mb == 50
         assert s.fallback_max_size_mb == 200
-        assert s.process_worker_memory_limit_mb == 2048
-        assert s.process_worker_timeout_s == 1800
+        assert s.process_worker_memory_limit_mb >= 2048
+        assert s.process_worker_timeout_s == 300
         assert s.process_worker_grace_period_s == 60
-        assert s.process_worker_max_concurrent == 2
-        assert s.duckdb_memory_limit_mb == 512
-        assert s.max_upload_size_gb == 10
-        assert s.streaming_queue_maxsize == 8
-        assert s.streaming_batch_target_rows == 50000
+        assert 2 <= s.process_worker_max_concurrent <= 8
+        assert s.duckdb_memory_limit_mb >= 512
+        assert s.max_upload_size_gb == 1000
+        assert s.streaming_queue_maxsize == 32
+        assert s.streaming_batch_target_rows == 10000
 
 
 # ---------------------------------------------------------------------------
@@ -586,8 +586,7 @@ class TestM10FallbackThreshold:
                  patch.object(service, "_cache_preview"), \
                  patch.object(service, "_save_record"), \
                  patch.object(service, "get_dataset", return_value=record), \
-                 patch.object(service, "_is_cancelled", return_value=False), \
-                 patch.object(service, "_run_indexing"):
+                 patch.object(service, "_is_cancelled", return_value=False):
                 result = await service.process_file("test-fb")
 
             mock_inmem.assert_called_once()

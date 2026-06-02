@@ -5,6 +5,7 @@ BQ-123A: Health check endpoints with deep component checks.
 - GET /api/health/deep     — bounded checks for 6 components (2s timeout each)
 - GET /api/health/issues   — active non-critical issues from the ring buffer
 """
+from app.config import settings  # S751: restore import dropped during de-vectorization
 import asyncio
 import logging
 import os

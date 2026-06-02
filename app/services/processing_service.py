@@ -1,3 +1,4 @@
+import concurrent.futures  # S751: restore import dropped during de-vectorization
 import logging
 import os
 import uuid

@@ -41,22 +41,9 @@ RUN pip install --no-cache-dir --prefix=/install \
 RUN PYTHONPATH=/install/lib/python3.11/site-packages \
     python -c "import nltk; nltk.download('punkt', download_dir='/install/nltk_data'); nltk.download('averaged_perceptron_tagger', download_dir='/install/nltk_data')"
 
-# Pre-download sentence-transformers model for air-gap operation.
-# Force PyTorch backend so no .onnx artifacts get baked into HF cache.
-RUN PYTHONPATH=/install/lib/python3.11/site-packages \
-    HF_HOME=/install/hf_cache \
-    SENTENCE_TRANSFORMERS_BACKEND=torch \
-    python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2', backend='torch')"
+# (de-vectorization S750) sentence-transformers model bake removed — embeddings dependency dropped from requirements.txt
 
-# CRITICAL: Remove onnxruntime from the /install prefix.
-# pip uninstall won't work here because packages were installed with --prefix=/install,
-# not into the system site-packages. onnxruntime causes MemoryError on ARM64/QEMU
-# (Docker on Apple Silicon) by spawning background optimization threads that crash
-# under CPU emulation. Nuking the files ensures it can't be imported at runtime.
-RUN rm -rf /install/lib/python3.11/site-packages/onnxruntime* \
-           /install/lib/python3.11/site-packages/onnx \
-           /install/lib/python3.11/site-packages/onnx-*.dist-info \
-           /install/lib/python3.11/site-packages/onnxruntime-*.dist-info
+# (de-vectorization S750) onnxruntime cleanup removed — no longer pulled in without sentence-transformers
 
 
 # ---- Stage 3: Runtime ----
@@ -94,7 +81,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy Python packages from builder
 COPY --from=backend-builder /install /usr/local
 COPY --from=backend-builder /install/nltk_data /usr/share/nltk_data
-COPY --from=backend-builder /install/hf_cache /root/.cache/huggingface
 
 # Copy backend application code
 COPY app/ ./app/

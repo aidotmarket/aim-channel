@@ -5,6 +5,7 @@ Presigned S3 GET URL generation for seller-owned S3 objects.
 from __future__ import annotations
 
 import boto3
+from botocore.config import Config
 
 from app.services.sts_broker import AssumedCredentials
 
@@ -22,6 +23,7 @@ def generate_presigned_get(
         aws_secret_access_key=creds.secret_access_key,
         aws_session_token=creds.session_token,
         region_name=creds.region,
+        config=Config(signature_version="s3v4"),
     )
     return s3_client.generate_presigned_url(
         "get_object",

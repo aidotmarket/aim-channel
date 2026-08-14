@@ -84,9 +84,17 @@ update_release_defaults() {
   sed -i '' "s|ghcr.io/aidotmarket/aim-data:\${AIM_DATA_VERSION:-[^}]*}|ghcr.io/aidotmarket/aim-data:\${AIM_DATA_VERSION:-v${ver}}|g" "$SHELL_INSTALLER"
   sed -i '' "s|else { 'v[0-9][^']*' }|else { 'v${ver}' }|g" "$POWERSHELL_INSTALLER"
 
-  grep -qF "ghcr.io/aidotmarket/aim-data:\${AIM_DATA_VERSION:-v${ver}}" "$COMPOSE_FILE" || die "sed failed to update $COMPOSE_FILE"
-  grep -qF "ghcr.io/aidotmarket/aim-data:\${AIM_DATA_VERSION:-v${ver}}" "$SHELL_INSTALLER" || die "sed failed to update $SHELL_INSTALLER"
-  grep -qF "else { 'v${ver}' }" "$POWERSHELL_INSTALLER" || die "sed failed to update $POWERSHELL_INSTALLER"
+  local compose_expected compose_defaults shell_expected shell_defaults powershell_expected powershell_defaults
+  compose_expected=$(grep -oF "ghcr.io/aidotmarket/aim-data:\${AIM_DATA_VERSION:-v${ver}}" "$COMPOSE_FILE" | wc -l | tr -d ' ' || true)
+  compose_defaults=$(grep -o 'AIM_DATA_VERSION:-v[0-9][^}]*' "$COMPOSE_FILE" | wc -l | tr -d ' ' || true)
+  shell_expected=$(grep -oF "ghcr.io/aidotmarket/aim-data:\${AIM_DATA_VERSION:-v${ver}}" "$SHELL_INSTALLER" | wc -l | tr -d ' ' || true)
+  shell_defaults=$(grep -o 'AIM_DATA_VERSION:-v[0-9][^}]*' "$SHELL_INSTALLER" | wc -l | tr -d ' ' || true)
+  powershell_expected=$(grep -oF "else { 'v${ver}' }" "$POWERSHELL_INSTALLER" | wc -l | tr -d ' ' || true)
+  powershell_defaults=$(grep -o "else { 'v[0-9][^']*' }" "$POWERSHELL_INSTALLER" | wc -l | tr -d ' ' || true)
+
+  [[ "$compose_expected" -eq 1 && "$compose_defaults" -eq 1 ]] || die "Expected exactly one v${ver} default in $COMPOSE_FILE"
+  [[ "$shell_expected" -eq 1 && "$shell_defaults" -eq 1 ]] || die "Expected exactly one v${ver} default in $SHELL_INSTALLER"
+  [[ "$powershell_expected" -eq 1 && "$powershell_defaults" -eq 1 ]] || die "Expected exactly one v${ver} default in $POWERSHELL_INSTALLER"
   pass "Release defaults updated → v${ver} (compose + shell + PowerShell)"
 }
 
@@ -108,7 +116,7 @@ commit_tag_push() {
 }
 
 wait_for_image() {
-  local tag="$1" max=600 interval=15 elapsed=0
+  local tag="$1" max=5400 interval=15 elapsed=0
   header "Waiting for $IMAGE:${tag}"
   while (( elapsed < max )); do
     if "$DOCKER" manifest inspect "$IMAGE:${tag}" &>/dev/null; then
@@ -120,7 +128,7 @@ wait_for_image() {
     elapsed=$((elapsed + interval))
   done
   echo
-  die "Timed out (10 min) waiting for $IMAGE:${tag}" \
+  die "Timed out (90 min) waiting for $IMAGE:${tag}" \
       "Check GitHub Actions: gh run list --workflow=aim-data-release.yml"
 }
 
@@ -165,6 +173,7 @@ cmd_rc() {
 
   commit_tag_push "$ver" "chore: release aim-data v${ver}"
 
+  # The tag workflow updates this prerelease with validated artifacts; reuse is intentional.
   gh release create "${TAG_PREFIX}v${ver}" --prerelease --title "AIM Data v${ver}" --generate-notes \
     || die "Failed to create GitHub pre-release." "gh release create ${TAG_PREFIX}v${ver} --prerelease --generate-notes"
   pass "GitHub pre-release created"
@@ -204,9 +213,10 @@ cmd_promote() {
   commit_tag_push "$ver" "chore: release aim-data v${ver}"
 
   info "GitHub Actions will build and verify $IMAGE:v${ver}, update :latest, and create the stable GitHub Release."
+  wait_for_image "v${ver}"
 
-  echo -e "\n${GREEN}${BOLD}STABLE RELEASE STARTED: ${TAG_PREFIX}v${ver}${RESET}  (promoted from $rc_tag)"
-  echo -e "  Pending workflow image: ${IMAGE}:v${ver}"
+  echo -e "\n${GREEN}${BOLD}STABLE RELEASE IMAGE AVAILABLE: ${TAG_PREFIX}v${ver}${RESET}  (promoted from $rc_tag)"
+  echo -e "  Image: ${IMAGE}:v${ver}"
   echo -e "  Tag:   ${TAG_PREFIX}v${ver}\n"
 }
 

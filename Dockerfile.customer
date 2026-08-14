@@ -8,8 +8,8 @@
 #   2. Backend:  Python → pip install → packages
 #   3. Runtime:  Python + nginx + tini → serves UI + API on port 80
 #
-# Usage with docker-compose.customer.yml:
-#   docker compose -f docker-compose.customer.yml up -d
+# Usage with docker-compose.aim-data.yml:
+#   docker compose -f docker-compose.aim-data.yml up -d
 # =============================================================================
 
 # ---- Stage 1: Build Frontend ----

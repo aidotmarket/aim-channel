@@ -57,6 +57,8 @@ Promotion removes the `-rc.N` suffix, updates the compose and both installer def
 
 The stable tag triggers the release workflow. The workflow builds and pushes both `ghcr.io/aidotmarket/aim-data:v1.22.4` and `ghcr.io/aidotmarket/aim-data:latest`; it does not promote the RC image by retagging it. After the push, it pulls the published stable image and fails unless the image's `version` label exactly equals `v1.22.4`. A stable label containing `-rc.` also fails explicitly. The GitHub Release is created only after that proof and the smoke test pass.
 
+A cold multi-architecture build includes the LibreOffice, Tesseract, and Torch layers under QEMU and can take many minutes. After the atomic push, `promote` waits up to 90 minutes for the stable version manifest to become pullable and reports success only after `docker manifest inspect` succeeds. If the image does not appear before the timeout, the command exits non-zero and points to the release workflow runs for recovery; do not move the tag or publish an image manually.
+
 `Dockerfile.customer` materializes the `VERSION` build argument in `/etc/aim-data-version` before applying the image label and environment value. A version change therefore invalidates the runtime layer even when the workflow imports the GitHub Actions BuildKit cache.
 
 ## Workflow checks

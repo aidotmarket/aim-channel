@@ -55,6 +55,14 @@ Or select an RC explicitly:
 
 Promotion removes the `-rc.N` suffix, updates the compose and both installer defaults together, commits that change, and atomically pushes `main` with an annotated stable tag such as `aim-data-v1.22.4`. The atomic push ensures the strict latest-stable CI check can see the matching tag when it validates the commit.
 
+On Titan-1 the repository carries the Koskadeux pre-push guardrail, which refuses direct pushes to `main` unless `KD_ALLOW_MAIN_PUSH=1` is set. Promotion is a deliberate operator release, so run it as:
+
+```bash
+KD_ALLOW_MAIN_PUSH=1 ./scripts/release-aim-data.sh promote
+```
+
+Without the sentinel the atomic push fails cleanly before anything reaches the remote; no state needs unwinding, and re-running with the sentinel completes the promotion (S1547).
+
 The stable tag triggers the release workflow. The workflow builds and pushes both `ghcr.io/aidotmarket/aim-data:v1.22.4` and `ghcr.io/aidotmarket/aim-data:latest`; it does not promote the RC image by retagging it. After the push, it pulls the published stable image and fails unless the image's `version` label exactly equals `v1.22.4`. A stable label containing `-rc.` also fails explicitly. The GitHub Release is created only after that proof and the smoke test pass.
 
 A cold multi-architecture build includes the LibreOffice, Tesseract, and Torch layers under QEMU and can take up to 90 minutes. After the atomic push, `promote` waits for the stable version manifest to become pullable, locates the release workflow run for the exact stable tag and commit, and watches it to a successful terminal state before reporting success. This means the published image label, multi-architecture manifest, container health smoke test, and GitHub Release have all passed; bare image existence alone is not treated as success. If the image does not appear before the timeout, the matching workflow run is absent, or the workflow fails, the command exits non-zero with recovery guidance; do not leave the pushed defaults on `main` pointing at an unverified image, move the tag, or publish an image manually.
@@ -78,6 +86,8 @@ During the promotion window, which can take up to 90 minutes for a cold build, a
 There is currently no automated rollback path. The previous rollback workflow was removed because it published from the wrong registry namespace and bypassed release verification. Rollback today means promoting an earlier stable version through the normal release path.
 
 ## Verification and recovery
+
+`promote` watches the workflow with `gh run watch`, which can die on transient GitHub API errors (for example `HTTP 401: Bad credentials` mid-watch, seen S1547) and then report the release as failed. Before acting on any promote failure report, check the run itself: `gh run view <run-id> --json status,conclusion`. If all jobs completed successfully, the release is verified and no recovery is needed; the workflow's own label-verify, smoke test, and Release creation are the proof, not the local watcher.
 
 List recent release runs:
 

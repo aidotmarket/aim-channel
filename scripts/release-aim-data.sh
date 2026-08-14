@@ -125,6 +125,42 @@ wait_for_image() {
       "Check GitHub Actions: gh run list --workflow=aim-data-release.yml"
 }
 
+wait_for_verified_release() {
+  local release_tag="${TAG_PREFIX}v${1}"
+  local tag_sha run_data run_id run_url
+
+  tag_sha=$(git rev-parse "${release_tag}^{commit}") \
+    || die "Could not resolve ${release_tag} to its release commit."
+
+  if ! run_data=$(gh run list \
+      --workflow=aim-data-release.yml \
+      --event=push \
+      --branch="$release_tag" \
+      --commit="$tag_sha" \
+      --limit=1 \
+      --json databaseId,url \
+      --jq 'if length == 0 then empty else .[0] | [.databaseId, .url] | @tsv end'); then
+    die "Could not query the release workflow run for ${release_tag}." \
+        "Inspect: gh run list --workflow=aim-data-release.yml --branch=${release_tag}. The pushed defaults on main now reference an unverified image and must not be left as-is."
+  fi
+
+  [[ -n "$run_data" ]] \
+    || die "No release workflow run found for ${release_tag}." \
+        "Inspect: gh run list --workflow=aim-data-release.yml --branch=${release_tag}. The pushed defaults on main now reference an unverified image and must not be left as-is."
+
+  IFS=$'\t' read -r run_id run_url <<< "$run_data"
+  [[ "$run_id" =~ ^[0-9]+$ && -n "$run_url" ]] \
+    || die "Invalid release workflow result for ${release_tag}." \
+        "Inspect: gh run list --workflow=aim-data-release.yml --branch=${release_tag}. The pushed defaults on main now reference an unverified image and must not be left as-is."
+
+  info "Watching verified release workflow: $run_url"
+  if ! gh run watch "$run_id" --exit-status; then
+    die "Release workflow did not complete successfully for ${release_tag} (run ${run_id})." \
+        "Inspect: gh run view ${run_id} --log-failed (${run_url}). The pushed defaults on main now reference an unverified image and must not be left as-is."
+  fi
+  pass "Release workflow completed successfully: $run_url"
+}
+
 # ---------------------------------------------------------------------------
 # rc [patch|minor|major]
 # ---------------------------------------------------------------------------
@@ -206,6 +242,7 @@ cmd_promote() {
 
   info "GitHub Actions will build and verify $IMAGE:v${ver}, update :latest, and create the stable GitHub Release."
   wait_for_image "v${ver}"
+  wait_for_verified_release "$ver"
 
   echo -e "\n${GREEN}${BOLD}STABLE RELEASE IMAGE AVAILABLE: ${TAG_PREFIX}v${ver}${RESET}  (promoted from $rc_tag)"
   echo -e "  Image: ${IMAGE}:v${ver}"

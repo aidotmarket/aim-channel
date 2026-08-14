@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $InstallDir = if ($env:AIM_DATA_INSTALL_DIR) { $env:AIM_DATA_INSTALL_DIR } else { Join-Path $HOME "aim-data" }
 $ComposeFile = "docker-compose.aim-data.yml"
 $ComposeUrl = "https://raw.githubusercontent.com/aidotmarket/aim-data/main/docker-compose.aim-data.yml"
-$Image = "ghcr.io/aidotmarket/aim-data:$(if ($env:AIM_DATA_VERSION) { $env:AIM_DATA_VERSION } else { 'v1.22.3' })"
+$Image = "ghcr.io/aidotmarket/aim-data:$(if ($env:AIM_DATA_VERSION) { $env:AIM_DATA_VERSION } else { 'v1.22.4' })"
 
 function Write-Banner {
     Write-Host ""

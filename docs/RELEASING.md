@@ -71,6 +71,10 @@ A cold multi-architecture build includes the LibreOffice, Tesseract, and Torch l
 
 `.github/workflows/ci-release-integrity.yml` runs on relevant pushes to `main`. It fails closed when the compose, shell-installer, or PowerShell-installer default does not match the latest stable tag. It also checks the multi-architecture workflow configuration, shell syntax, installer safety conventions, and the `v` prefix.
 
+## Rollback
+
+There is currently no automated rollback path. The previous rollback workflow was removed because it published from the wrong registry namespace and bypassed release verification. Rollback today means promoting an earlier stable version through the normal release path.
+
 ## Verification and recovery
 
 List recent release runs:

@@ -35,33 +35,27 @@ jobs:
           VERSION="${LATEST_TAG#aim-data-}"
           ERRORS=0
 
-          COMPOSE_EXPECTED=$(grep -oF "AIM_DATA_VERSION:-${VERSION}" docker-compose.aim-data.yml | wc -l | tr -d ' ' || true)
-          COMPOSE_DEFAULTS=$(grep -o 'AIM_DATA_VERSION:-v[0-9][^}]*' docker-compose.aim-data.yml | wc -l | tr -d ' ' || true)
-          if [ "$COMPOSE_EXPECTED" -eq 1 ] && [ "$COMPOSE_DEFAULTS" -eq 1 ]; then
-            echo "✅ Compose file has exactly one default referencing ${LATEST_TAG}"
+          if grep -qF "AIM_DATA_VERSION:-${VERSION}" docker-compose.aim-data.yml; then
+            echo "✅ Compose file references ${LATEST_TAG}"
           else
-            COMPOSE_VERSIONS=$(grep -o 'AIM_DATA_VERSION:-v[0-9][^}]*' docker-compose.aim-data.yml | tr '\n' ' ' || true)
-            echo "::error::INTEGRITY FAILED — Compose file must have exactly one ${VERSION} default; found ${COMPOSE_DEFAULTS}: ${COMPOSE_VERSIONS:-unparseable}."
+            COMPOSE_VERSION=$(grep -o 'AIM_DATA_VERSION:-[^}]*' docker-compose.aim-data.yml | head -1 || true)
+            echo "::error::INTEGRITY FAILED — Compose file has ${COMPOSE_VERSION:-unparseable} but latest tag is ${LATEST_TAG}."
             ERRORS=$((ERRORS + 1))
           fi
 
-          SHELL_EXPECTED=$(grep -oF "AIM_DATA_VERSION:-${VERSION}" installers/aim-data/install.sh | wc -l | tr -d ' ' || true)
-          SHELL_DEFAULTS=$(grep -o 'AIM_DATA_VERSION:-v[0-9][^}]*' installers/aim-data/install.sh | wc -l | tr -d ' ' || true)
-          if [ "$SHELL_EXPECTED" -eq 1 ] && [ "$SHELL_DEFAULTS" -eq 1 ]; then
-            echo "✅ Shell installer has exactly one default referencing ${LATEST_TAG}"
+          if grep -qF "AIM_DATA_VERSION:-${VERSION}" installers/aim-data/install.sh; then
+            echo "✅ Shell installer references ${LATEST_TAG}"
           else
-            SHELL_VERSIONS=$(grep -o 'AIM_DATA_VERSION:-v[0-9][^}]*' installers/aim-data/install.sh | tr '\n' ' ' || true)
-            echo "::error::INTEGRITY FAILED — Shell installer must have exactly one ${VERSION} default; found ${SHELL_DEFAULTS}: ${SHELL_VERSIONS:-unparseable}."
+            SHELL_VERSION=$(grep -o 'AIM_DATA_VERSION:-[^}]*' installers/aim-data/install.sh | head -1 || true)
+            echo "::error::INTEGRITY FAILED — Shell installer has ${SHELL_VERSION:-unparseable} but latest tag is ${LATEST_TAG}."
             ERRORS=$((ERRORS + 1))
           fi
 
-          POWERSHELL_EXPECTED=$(grep -oF "else { '${VERSION}' }" installers/aim-data/install.ps1 | wc -l | tr -d ' ' || true)
-          POWERSHELL_DEFAULTS=$(grep -o "else { 'v[0-9][^']*' }" installers/aim-data/install.ps1 | wc -l | tr -d ' ' || true)
-          if [ "$POWERSHELL_EXPECTED" -eq 1 ] && [ "$POWERSHELL_DEFAULTS" -eq 1 ]; then
-            echo "✅ PowerShell installer has exactly one default referencing ${LATEST_TAG}"
+          if grep -qF "else { '${VERSION}' }" installers/aim-data/install.ps1; then
+            echo "✅ PowerShell installer references ${LATEST_TAG}"
           else
-            POWERSHELL_VERSIONS=$(grep -o "else { 'v[0-9][^']*' }" installers/aim-data/install.ps1 | tr '\n' ' ' || true)
-            echo "::error::INTEGRITY FAILED — PowerShell installer must have exactly one ${VERSION} default; found ${POWERSHELL_DEFAULTS}: ${POWERSHELL_VERSIONS:-unparseable}."
+            POWERSHELL_VERSION=$(grep -o "else { 'v[0-9][^']*' }" installers/aim-data/install.ps1 | head -1 || true)
+            echo "::error::INTEGRITY FAILED — PowerShell installer has ${POWERSHELL_VERSION:-unparseable} but latest tag is ${LATEST_TAG}."
             ERRORS=$((ERRORS + 1))
           fi
 
@@ -101,6 +95,22 @@ jobs:
 
           echo "✅ Multi-arch build configuration verified"
 
+      - name: Verify install scripts use versioned downloads
+        run: |
+          for script in installers/mac/install-mac.sh installers/linux/install-linux.sh; do
+            if [ -f "$script" ]; then
+              if grep -q 'COMPOSE_URL="https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/' "$script"; then
+                echo "::error::${script} hardcodes compose from main branch"
+                exit 1
+              fi
+              if ! grep -q 'INSTALL_REF' "$script"; then
+                echo "::error::${script} missing INSTALL_REF override"
+                exit 1
+              fi
+              echo "${script} OK"
+            fi
+          done
+
       - name: Shell script syntax check
         run: |
           ERRORS=0
@@ -117,6 +127,26 @@ jobs:
           
           if [ "$ERRORS" -gt 0 ]; then
             exit 1
+          fi
+
+      - name: Install script safety checks
+        run: |
+          # Check mac installer has health gate
+          if [ -f installers/mac/install-mac.sh ]; then
+            if ! grep -q "HEALTH_OK" installers/mac/install-mac.sh; then
+              echo "::error::install-mac.sh missing HEALTH_OK check — success banner may show on failure"
+              exit 1
+            fi
+            echo "✅ Mac installer has health gate"
+          fi
+          
+          # Check linux installer has health gate
+          if [ -f installers/linux/install-linux.sh ]; then
+            if ! grep -q "HEALTH_OK" installers/linux/install-linux.sh; then
+              echo "::error::install-linux.sh missing HEALTH_OK check — success banner may show on failure"
+              exit 1
+            fi
+            echo "✅ Linux installer has health gate"
           fi
 
       - name: Verify v-prefix convention

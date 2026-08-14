@@ -19,7 +19,7 @@ jobs:
         with:
           fetch-depth: 0  # Need tags for version check
 
-      - name: Check compose version matches latest tag
+      - name: Check release version defaults match latest tag
         run: |
           # Get latest release tag
           LATEST_TAG=$(git tag -l 'aim-data-v*' --sort=-v:refname | grep -E '^aim-data-v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
@@ -31,15 +31,36 @@ jobs:
           
           echo "Latest tag: $LATEST_TAG"
           
-          # Check compose file references this tag
+          # Compose and both standalone installers must reference this tag.
           VERSION="${LATEST_TAG#aim-data-}"
+          ERRORS=0
 
-          if grep -q "AIM_DATA_VERSION:-${VERSION}" docker-compose.aim-data.yml; then
+          if grep -qF "AIM_DATA_VERSION:-${VERSION}" docker-compose.aim-data.yml; then
             echo "✅ Compose file references ${LATEST_TAG}"
           else
-            COMPOSE_VERSION=$(grep -o 'AIM_DATA_VERSION:-[^}]*' docker-compose.aim-data.yml | head -1)
-            echo "::warning::Compose file has ${COMPOSE_VERSION} but latest tag is ${LATEST_TAG}"
-            echo "This is OK if a new release is in progress."
+            COMPOSE_VERSION=$(grep -o 'AIM_DATA_VERSION:-[^}]*' docker-compose.aim-data.yml | head -1 || true)
+            echo "::error::INTEGRITY FAILED — Compose file has ${COMPOSE_VERSION:-unparseable} but latest tag is ${LATEST_TAG}."
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          if grep -qF "AIM_DATA_VERSION:-${VERSION}" installers/aim-data/install.sh; then
+            echo "✅ Shell installer references ${LATEST_TAG}"
+          else
+            SHELL_VERSION=$(grep -o 'AIM_DATA_VERSION:-[^}]*' installers/aim-data/install.sh | head -1 || true)
+            echo "::error::INTEGRITY FAILED — Shell installer has ${SHELL_VERSION:-unparseable} but latest tag is ${LATEST_TAG}."
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          if grep -qF "else { '${VERSION}' }" installers/aim-data/install.ps1; then
+            echo "✅ PowerShell installer references ${LATEST_TAG}"
+          else
+            POWERSHELL_VERSION=$(grep -o "else { 'v[0-9][^']*' }" installers/aim-data/install.ps1 | head -1 || true)
+            echo "::error::INTEGRITY FAILED — PowerShell installer has ${POWERSHELL_VERSION:-unparseable} but latest tag is ${LATEST_TAG}."
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          if [ "$ERRORS" -gt 0 ]; then
+            exit 1
           fi
 
       - name: Verify multi-arch build configuration

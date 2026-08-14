@@ -2,92 +2,87 @@
 
 ## Overview
 
-Releases are a two-part process: a local script that prepares the release, and GitHub Actions that builds, verifies, and publishes it.
+AIM Data releases use `scripts/release-aim-data.sh` to create namespaced Git tags and `.github/workflows/aim-data-release.yml` to build, verify, and publish the customer image and GitHub Release.
 
-**NEVER manually tag, build, or push Docker images.** Always use `release.sh`.
+Do not manually create release tags or publish Docker images. Use the release script from the AIM Data repository.
 
 ## Prerequisites
 
-- On `main` branch with clean working tree
-- `docker` CLI available (OrbStack or Docker Desktop)
-- `gh` CLI installed and authenticated (`brew install gh && gh auth login`)
-- GHCR access (script handles auth via Doppler or GITHUB_TOKEN)
+- Work from `/Users/max/Projects/ai-market/aim-data` on `main` with a clean working tree.
+- Ensure local `main` contains the release changes.
+- Install and authenticate the `gh` CLI.
+- Start Docker Desktop or OrbStack and ensure the Docker CLI can reach GHCR. The script uses `GITHUB_TOKEN` or the configured Doppler fallback if GHCR login is required.
 
-## Usage
+## Version defaults
+
+The release script is the single update path for the customer-facing default version. Its `update_release_defaults` function rewrites these three embedded defaults together:
+
+- `docker-compose.aim-data.yml`
+- `installers/aim-data/install.sh`
+- `installers/aim-data/install.ps1`
+
+The installers keep an embedded default because each installer can be downloaded and run as a standalone file; neither can depend on a separate version file being downloaded first.
+
+Release candidates do not change customer defaults. Promotion updates all three defaults to the stable version in one commit. `.github/workflows/ci-release-integrity.yml` fails if any default differs from the latest stable `aim-data-vX.Y.Z` tag.
+
+## Create a release candidate
+
+From the repository root:
 
 ```bash
-cd ~/Projects/vectoraiz/vectoraiz-monorepo
-
-# Bump patch: 1.16.0 → 1.16.1
-./scripts/release.sh patch
-
-# Bump minor: 1.16.0 → 1.17.0
-./scripts/release.sh minor
-
-# Specific version
-./scripts/release.sh 2.0.0
+./scripts/release-aim-data.sh rc patch
+./scripts/release-aim-data.sh rc minor
+./scripts/release-aim-data.sh rc major
 ```
 
-## What happens
+The script finds the latest stable `aim-data-vX.Y.Z` tag, calculates the next semantic version and RC number, creates an annotated `aim-data-vX.Y.Z-rc.N` tag, and pushes it. It also creates the GitHub prerelease entry.
 
-### Local (release.sh)
+The tag triggers `.github/workflows/aim-data-release.yml`. The workflow builds and pushes `ghcr.io/aidotmarket/aim-data:vX.Y.Z-rc.N`, verifies its published `version` label, checks its multi-architecture manifest, runs the container health smoke test, and attaches the installers and compose file to the GitHub prerelease.
 
-1. **Pre-flight checks** — main branch, clean tree, docker, gh, GHCR auth
-2. **Update compose** — sets `VECTORAIZ_VERSION:-v1.17.0` in `docker-compose.customer.yml`
-3. **Commit + push** — commits compose change, pushes to main, verifies GitHub raw URL
-4. **Tag + push tag** — creates `v1.17.0` tag, pushes to origin
-5. **Wait for image** — polls GHCR until the image is available (up to 30 min)
-6. **Smoke test** — verifies install URL and `:latest` tag match
+## Promote an RC to stable
 
-### GitHub Actions (triggered by tag push)
+Promote the latest RC:
 
-1. **verify-release** — confirms compose file has correct version, install scripts have health gates, Dockerfile exists
-2. **build-push** — builds Docker image from `Dockerfile.customer`, pushes to GHCR as `v1.17.0` + `latest`
-3. **smoke-test** — pulls image, verifies digests match, simulates install, runs container startup health check
-4. **create-release** — creates GitHub Release with installer scripts (only if smoke test passes)
-
-### CI (on every push to main)
-
-- Verifies compose version matches latest tag
-- Shell script syntax checks
-- Install script safety checks (health gates present)
-- v-prefix convention enforcement
-
-## Critical rules
-
-- **GHCR tags always have `v` prefix**: `v1.16.0`, never `1.16.0`
-- **Compose file always references v-prefixed version**: `VECTORAIZ_VERSION:-v1.16.0`
-- **Install scripts must gate success banner on health check**: no false "installed!" messages
-- **GitHub Actions is the enforcement layer**: even if release.sh has a bug, Actions will catch it
-
-## Recovery procedures
-
-### Tag pushed but image build failed
 ```bash
-# Check what went wrong
-gh run list --workflow=release.yml --limit 5
-
-# If compose was wrong, fix and force-update:
-# 1. Fix docker-compose.customer.yml
-# 2. git commit and push
-# 3. Delete the tag: git tag -d v1.17.0 && git push origin :refs/tags/v1.17.0
-# 4. Re-run: ./scripts/release.sh 1.17.0
+./scripts/release-aim-data.sh promote
 ```
 
-### Compose file has wrong version
+Or select an RC explicitly:
+
 ```bash
-# Edit docker-compose.customer.yml manually
-sed -i '' 's/VECTORAIZ_VERSION:-v.*/VECTORAIZ_VERSION:-v1.17.0}/' docker-compose.customer.yml
-git add docker-compose.customer.yml
-git commit -m "fix: correct compose version to v1.17.0"
-git push origin main
+./scripts/release-aim-data.sh promote aim-data-v1.22.4-rc.2
 ```
 
-### Install script serving old version (CDN cache)
-GitHub raw CDN can take 5-10 minutes to propagate. The CI workflow will warn but not block. If it persists beyond 10 minutes, check that the commit actually reached `main`.
+Promotion removes the `-rc.N` suffix, updates the compose and both installer defaults together, commits that change, and atomically pushes `main` with an annotated stable tag such as `aim-data-v1.22.4`. The atomic push ensures the strict latest-stable CI check can see the matching tag when it validates the commit.
 
-### Health check fails in smoke test
-The container startup test runs in GitHub Actions. If it fails:
-1. Check the Actions log for container logs
-2. The image was already pushed to GHCR but the GitHub Release was NOT created
-3. Fix the issue, bump a new patch version
+The stable tag triggers the release workflow. The workflow builds and pushes both `ghcr.io/aidotmarket/aim-data:v1.22.4` and `ghcr.io/aidotmarket/aim-data:latest`; it does not promote the RC image by retagging it. After the push, it pulls the published stable image and fails unless the image's `version` label exactly equals `v1.22.4`. A stable label containing `-rc.` also fails explicitly. The GitHub Release is created only after that proof and the smoke test pass.
+
+`Dockerfile.customer` materializes the `VERSION` build argument in `/etc/aim-data-version` before applying the image label and environment value. A version change therefore invalidates the runtime layer even when the workflow imports the GitHub Actions BuildKit cache.
+
+## Workflow checks
+
+`.github/workflows/aim-data-release.yml` performs these jobs:
+
+1. `build-push` extracts the version from the `aim-data-v*` tag, builds the AMD64 and ARM64 image, pushes the release tag (and `latest` for stable releases), and verifies the published image label.
+2. `smoke-test` verifies both architectures are present, pulls the published image, starts it, and waits for `/api/health`.
+3. `create-release` creates or updates the GitHub Release and attaches `install.sh`, `install.ps1`, and `docker-compose.aim-data.yml` only after the preceding jobs pass.
+
+`.github/workflows/ci-release-integrity.yml` runs on relevant pushes to `main`. It fails closed when the compose, shell-installer, or PowerShell-installer default does not match the latest stable tag. It also checks the multi-architecture workflow configuration, shell syntax, installer safety conventions, and the `v` prefix.
+
+## Verification and recovery
+
+List recent release runs:
+
+```bash
+gh run list --workflow=aim-data-release.yml --limit 5
+```
+
+Inspect a failed run before taking any recovery action:
+
+```bash
+gh run view <run-id> --log-failed
+```
+
+If a release workflow fails, do not overwrite or move the existing tag and do not manually publish an image. Fix the cause on `main`, then use the normal release script to create a new RC or stable version. The stable GitHub Release is not created unless the image-label proof and smoke test pass.
+
+GHCR image tags always include the `v` prefix (`v1.22.4`, not `1.22.4`), while Git tags include the repository namespace (`aim-data-v1.22.4`).

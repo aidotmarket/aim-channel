@@ -8,8 +8,8 @@
 #   2. Backend:  Python → pip install → packages
 #   3. Runtime:  Python + nginx + tini → serves UI + API on port 80
 #
-# Usage with docker-compose.customer.yml:
-#   docker compose -f docker-compose.customer.yml up -d
+# Usage with docker-compose.aim-data.yml:
+#   docker compose -f docker-compose.aim-data.yml up -d
 # =============================================================================
 
 # ---- Stage 1: Build Frontend ----
@@ -52,8 +52,6 @@ FROM python:3.11.11-slim-bookworm AS runtime
 LABEL maintainer="ai.market <ops@ai.market>"
 LABEL description="AIM Data — Self-hosted listing management for ai.market"
 ARG VERSION=dev
-LABEL version="${VERSION}"
-ENV VECTORAIZ_VERSION=${VERSION}
 
 WORKDIR /app
 
@@ -101,6 +99,12 @@ RUN rm -f /etc/nginx/sites-enabled/default
 # Create data directories
 RUN mkdir -p /data/uploads /data/processed /data/temp /data/keystore && \
     chmod 755 /data
+
+# Materialize VERSION so changing the build arg invalidates this final runtime
+# layer before release metadata is applied, including with imported GHA cache.
+RUN test -n "$VERSION" && printf '%s\n' "$VERSION" > /etc/aim-data-version
+LABEL version="${VERSION}"
+ENV VECTORAIZ_VERSION=${VERSION}
 
 VOLUME ["/data"]
 EXPOSE 80

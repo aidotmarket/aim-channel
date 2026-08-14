@@ -69,6 +69,26 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
+      - name: Verify published image version label
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          IS_RC="${{ steps.version.outputs.is_rc }}"
+          IMAGE="ghcr.io/aidotmarket/aim-data:${VERSION}"
+
+          docker pull "$IMAGE"
+          IMAGE_VERSION=$(docker image inspect --format '{{ index .Config.Labels "version" }}' "$IMAGE")
+
+          if [ "$IMAGE_VERSION" != "$VERSION" ]; then
+            echo "::error::RELEASE FAILED — Published image version label is '${IMAGE_VERSION:-missing}', expected '${VERSION}'."
+            exit 1
+          fi
+
+          if [ "$IS_RC" != "true" ] && echo "$IMAGE_VERSION" | grep -q -- '-rc\.'; then
+            echo "::error::RELEASE FAILED — Stable image version label contains an RC suffix: '${IMAGE_VERSION}'."
+            exit 1
+          fi
+
+          echo "Published image version label verified: ${IMAGE_VERSION}"
 
   smoke-test:
     needs: build-push

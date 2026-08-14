@@ -14,6 +14,9 @@ cd "$REPO_ROOT"
 IMAGE="ghcr.io/aidotmarket/aim-data"
 TAG_PREFIX="aim-data-"
 COMPOSE_FILE="docker-compose.aim-data.yml"
+SHELL_INSTALLER="installers/aim-data/install.sh"
+POWERSHELL_INSTALLER="installers/aim-data/install.ps1"
+VERSION_FILES=("$COMPOSE_FILE" "$SHELL_INSTALLER" "$POWERSHELL_INSTALLER")
 
 # ---------------------------------------------------------------------------
 # Colors & helpers
@@ -75,17 +78,22 @@ latest_stable_tag() {
   git tag -l "${TAG_PREFIX}v*" --sort=-v:refname | grep -E "^${TAG_PREFIX}v[0-9]+\.[0-9]+\.[0-9]+$" | head -1 || true
 }
 
-update_compose() {
+update_release_defaults() {
   local ver="$1"
   sed -i '' "s|ghcr.io/aidotmarket/aim-data:\${AIM_DATA_VERSION:-[^}]*}|ghcr.io/aidotmarket/aim-data:\${AIM_DATA_VERSION:-v${ver}}|g" "$COMPOSE_FILE"
+  sed -i '' "s|ghcr.io/aidotmarket/aim-data:\${AIM_DATA_VERSION:-[^}]*}|ghcr.io/aidotmarket/aim-data:\${AIM_DATA_VERSION:-v${ver}}|g" "$SHELL_INSTALLER"
+  sed -i '' "s|else { 'v[0-9][^']*' }|else { 'v${ver}' }|g" "$POWERSHELL_INSTALLER"
+
   grep -qF "ghcr.io/aidotmarket/aim-data:\${AIM_DATA_VERSION:-v${ver}}" "$COMPOSE_FILE" || die "sed failed to update $COMPOSE_FILE"
-  pass "Compose updated → v${ver}"
+  grep -qF "ghcr.io/aidotmarket/aim-data:\${AIM_DATA_VERSION:-v${ver}}" "$SHELL_INSTALLER" || die "sed failed to update $SHELL_INSTALLER"
+  grep -qF "else { 'v${ver}' }" "$POWERSHELL_INSTALLER" || die "sed failed to update $POWERSHELL_INSTALLER"
+  pass "Release defaults updated → v${ver} (compose + shell + PowerShell)"
 }
 
 commit_tag_push() {
-  local ver="$1" msg="$2" prerelease="${3:-false}"
+  local ver="$1" msg="$2"
 
-  git add "$COMPOSE_FILE"
+  git add "${VERSION_FILES[@]}"
   if ! git diff --cached --quiet; then
     git commit -m "$msg"
     pass "Committed: $msg"
@@ -94,13 +102,14 @@ commit_tag_push() {
   git tag -a "${TAG_PREFIX}v${ver}" -m "Release ${TAG_PREFIX}v${ver}"
   pass "Tagged ${TAG_PREFIX}v${ver}"
 
-  git push origin main 2>/dev/null || true
-  git push origin "${TAG_PREFIX}v${ver}" || die "Failed to push tag ${TAG_PREFIX}v${ver}"
-  pass "Pushed commit + tag"
+  git push --atomic origin main "${TAG_PREFIX}v${ver}" \
+    || die "Failed to push main and ${TAG_PREFIX}v${ver} atomically"
+  pass "Pushed main + tag atomically"
 }
 
 wait_for_image() {
-  local tag="$1" max=600 interval=15 elapsed=0
+  # Cold multi-arch QEMU builds include LibreOffice, Tesseract, and Torch layers, so allow 90 minutes.
+  local tag="$1" max=5400 interval=15 elapsed=0
   header "Waiting for $IMAGE:${tag}"
   while (( elapsed < max )); do
     if "$DOCKER" manifest inspect "$IMAGE:${tag}" &>/dev/null; then
@@ -112,8 +121,44 @@ wait_for_image() {
     elapsed=$((elapsed + interval))
   done
   echo
-  die "Timed out (10 min) waiting for $IMAGE:${tag}" \
+  die "Timed out (90 min) waiting for $IMAGE:${tag}" \
       "Check GitHub Actions: gh run list --workflow=aim-data-release.yml"
+}
+
+wait_for_verified_release() {
+  local release_tag="${TAG_PREFIX}v${1}"
+  local tag_sha run_data run_id run_url
+
+  tag_sha=$(git rev-parse "${release_tag}^{commit}") \
+    || die "Could not resolve ${release_tag} to its release commit."
+
+  if ! run_data=$(gh run list \
+      --workflow=aim-data-release.yml \
+      --event=push \
+      --branch="$release_tag" \
+      --commit="$tag_sha" \
+      --limit=1 \
+      --json databaseId,url \
+      --jq 'if length == 0 then empty else .[0] | [.databaseId, .url] | @tsv end'); then
+    die "Could not query the release workflow run for ${release_tag}." \
+        "Inspect: gh run list --workflow=aim-data-release.yml --branch=${release_tag}. The pushed defaults on main now reference an unverified image and must not be left as-is."
+  fi
+
+  [[ -n "$run_data" ]] \
+    || die "No release workflow run found for ${release_tag}." \
+        "Inspect: gh run list --workflow=aim-data-release.yml --branch=${release_tag}. The pushed defaults on main now reference an unverified image and must not be left as-is."
+
+  IFS=$'\t' read -r run_id run_url <<< "$run_data"
+  [[ "$run_id" =~ ^[0-9]+$ && -n "$run_url" ]] \
+    || die "Invalid release workflow result for ${release_tag}." \
+        "Inspect: gh run list --workflow=aim-data-release.yml --branch=${release_tag}. The pushed defaults on main now reference an unverified image and must not be left as-is."
+
+  info "Watching verified release workflow: $run_url"
+  if ! gh run watch "$run_id" --exit-status; then
+    die "Release workflow did not complete successfully for ${release_tag} (run ${run_id})." \
+        "Inspect: gh run view ${run_id} --log-failed (${run_url}). The pushed defaults on main now reference an unverified image and must not be left as-is."
+  fi
+  pass "Release workflow completed successfully: $run_url"
 }
 
 # ---------------------------------------------------------------------------
@@ -139,12 +184,13 @@ cmd_rc() {
     major) next="$((major + 1)).0.0" ;;
   esac
 
-  local highest=0
+  local highest=0 rc_tags
+  rc_tags=$(git tag -l "${TAG_PREFIX}v${next}-rc.*")
   while IFS= read -r t; do
     [[ -z "$t" ]] && continue
     local n="${t##*-rc.}"
     (( n > highest )) 2>/dev/null && highest="$n"
-  done < <(git tag -l "${TAG_PREFIX}v${next}-rc.*")
+  done <<< "$rc_tags"
 
   local rc_num=$((highest + 1))
   local ver="${next}-rc.${rc_num}"
@@ -154,7 +200,6 @@ cmd_rc() {
   pass "Current stable: ${TAG_PREFIX}v${current}"
   pass "New RC:         ${TAG_PREFIX}v${ver}"
 
-  update_compose "$ver"
   commit_tag_push "$ver" "chore: release aim-data v${ver}"
 
   gh release create "${TAG_PREFIX}v${ver}" --prerelease --title "AIM Data v${ver}" --generate-notes \
@@ -192,33 +237,14 @@ cmd_promote() {
   pass "RC:     $rc_tag"
   pass "Stable: ${TAG_PREFIX}v${ver}"
 
-  update_compose "$ver"
-  commit_tag_push "$ver" "chore: release aim-data v${ver}" false
+  update_release_defaults "$ver"
+  commit_tag_push "$ver" "chore: release aim-data v${ver}"
 
-  header "Retagging $IMAGE:${rc_version} → $IMAGE:v${ver}"
-  "$DOCKER" buildx imagetools create \
-    --tag "$IMAGE:v${ver}" \
-    "$IMAGE:${rc_version}" \
-    || die "Failed to retag $IMAGE:${rc_version} → v${ver}" \
-           "Verify RC image exists: $DOCKER manifest inspect $IMAGE:${rc_version}"
-  pass "Multi-arch retag complete"
+  info "GitHub Actions will build and verify $IMAGE:v${ver}, update :latest, and create the stable GitHub Release."
+  wait_for_image "v${ver}"
+  wait_for_verified_release "$ver"
 
-  header "Retagging $IMAGE:v${ver} → $IMAGE:latest"
-  "$DOCKER" buildx imagetools create \
-    --tag "$IMAGE:latest" \
-    "$IMAGE:v${ver}" \
-    || die "Failed to retag $IMAGE:v${ver} → latest" \
-           "Installer pulls :latest; without this, new installs get the previous image."
-  pass ":latest now points to v${ver}"
-
-  info "Pulling image..."
-  "$DOCKER" pull "$IMAGE:v${ver}" &>/dev/null && pass "docker pull OK" || die "docker pull failed"
-
-  gh release create "${TAG_PREFIX}v${ver}" --latest --title "AIM Data v${ver}" --generate-notes \
-    || die "Failed to create GitHub release." "gh release create ${TAG_PREFIX}v${ver} --latest --generate-notes"
-  pass "GitHub release created (latest)"
-
-  echo -e "\n${GREEN}${BOLD}STABLE RELEASED: ${TAG_PREFIX}v${ver}${RESET}  (promoted from $rc_tag)"
+  echo -e "\n${GREEN}${BOLD}STABLE RELEASE IMAGE AVAILABLE: ${TAG_PREFIX}v${ver}${RESET}  (promoted from $rc_tag)"
   echo -e "  Image: ${IMAGE}:v${ver}"
   echo -e "  Tag:   ${TAG_PREFIX}v${ver}\n"
 }

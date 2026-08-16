@@ -2,7 +2,7 @@ import { MessageCircle } from "lucide-react";
 import { useCoPilot } from "@/contexts/CoPilotContext";
 
 export default function CoPilotFab() {
-  const { toggle, isOpen, allieAvailable, embeddedSurfaceActive } = useCoPilot();
+  const { toggle, isOpen, hasUnread, allieAvailable, embeddedSurfaceActive } = useCoPilot();
 
   if (!allieAvailable) return null;
   if (embeddedSurfaceActive) return null;
@@ -20,6 +20,12 @@ export default function CoPilotFab() {
       title="Open allAI"
     >
       <MessageCircle className="h-5 w-5 text-primary/70" />
+      {hasUnread && (
+        <span
+          aria-label="Unread allAI messages"
+          className="absolute right-1 top-1 h-2.5 w-2.5 rounded-full bg-primary"
+        />
+      )}
     </button>
   );
 }

@@ -48,6 +48,7 @@ export interface ChatMessage {
 
 interface CoPilotState {
   isOpen: boolean;
+  hasUnread: boolean;
   embeddedSurfaceActive: boolean;
   sessionId: string | null;
   messages: ChatMessage[];
@@ -114,6 +115,7 @@ export const CoPilotProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const { channel, hasFeature, isLoading: modeLoading } = useMode();
 
   const [isOpen, setIsOpen] = useState(false);
+  const [hasUnread, setHasUnread] = useState(false);
   const [embeddedSurfaceActive, setEmbeddedSurfaceActive] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -369,7 +371,7 @@ export const CoPilotProvider: React.FC<{ children: React.ReactNode }> = ({ child
         // Send initial STATE_SNAPSHOT so allAI knows where the user is
         sendStateSnapshotRef.current();
 
-        // Auto-open with welcome message on every fresh login
+        // Queue a welcome message on every fresh login
         if (configuredAvailable && data.allie_available && !welcomedThisSessionRef.current) {
           welcomedThisSessionRef.current = true;
           setMessages((prev) => {
@@ -387,7 +389,7 @@ export const CoPilotProvider: React.FC<{ children: React.ReactNode }> = ({ child
             }
             return prev;
           });
-          setIsOpen(true);
+          if (!isOpenRef.current) setHasUnread(true);
         }
         break;
 
@@ -427,6 +429,7 @@ export const CoPilotProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setStreamingMessageId(null);
         streamBufferRef.current = "";
         setStreamBuffer("");
+        if (!isOpenRef.current) setHasUnread(true);
         break;
       }
 
@@ -523,7 +526,10 @@ export const CoPilotProvider: React.FC<{ children: React.ReactNode }> = ({ child
             duration: 8000,
             action: {
               label: "Open Chat",
-              onClick: () => setIsOpen(true),
+              onClick: () => {
+                setHasUnread(false);
+                setIsOpen(true);
+              },
             },
           });
           // Also store in messages so it appears when panel opens
@@ -653,6 +659,7 @@ export const CoPilotProvider: React.FC<{ children: React.ReactNode }> = ({ child
     } else {
       // Auth dropped — reset all CoPilot state
       setIsOpen(false);
+      setHasUnread(false);
       setMessages([]);
       setIsConnected(false);
       setConnectionStatus("disconnected");
@@ -760,14 +767,21 @@ export const CoPilotProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, []);
 
-  const open = useCallback(() => setIsOpen(true), []);
+  const open = useCallback(() => {
+    setHasUnread(false);
+    setIsOpen(true);
+  }, []);
   const close = useCallback(() => setIsOpen(false), []);
-  const toggle = useCallback(() => setIsOpen((p) => !p), []);
+  const toggle = useCallback(() => {
+    if (!isOpenRef.current) setHasUnread(false);
+    setIsOpen((current) => !current);
+  }, []);
 
   return (
     <CoPilotContext.Provider
       value={{
         isOpen,
+        hasUnread,
         embeddedSurfaceActive,
         sessionId,
         messages,

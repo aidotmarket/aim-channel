@@ -8,6 +8,7 @@ All seller S3 access goes through ai.market's authenticated broker endpoints.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Iterator
 from typing import Any, Optional
 
 import httpx
@@ -106,6 +107,33 @@ class S3BrokerClient:
         if not url:
             raise S3BrokerError("S3 broker did not return a presigned URL.")
         return data
+
+    def stream_registered_artifact(
+        self,
+        *,
+        source_handle_id: str,
+        chunk_size: int = 65536,
+    ) -> Iterator[bytes]:
+        """Stream a verification artifact using only its opaque registered handle.
+
+        Unlike the legacy fulfillment presign operation, this verification path
+        does not place connection IDs, bucket names, or object keys on the wire.
+        """
+        data = self._request(
+            "POST",
+            "verification-artifact",
+            json={"source_handle_id": source_handle_id},
+        )
+        url = data.get("url")
+        if not url:
+            raise S3BrokerError("S3 broker did not return a verification artifact URL.")
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                with client.stream("GET", str(url)) as response:
+                    response.raise_for_status()
+                    yield from response.iter_bytes(chunk_size=chunk_size)
+        except httpx.HTTPError as exc:
+            raise S3BrokerError("S3 verification artifact stream is unavailable.") from exc
 
     def _credentials(self) -> S3BrokerCredentials:
         state = get_serial_store().state

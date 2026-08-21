@@ -23,14 +23,12 @@ Each is independent — failure of one does not block the next.
 import asyncio
 import base64
 import hashlib
-import json
 import logging
 import math
 import mimetypes
 import os
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -43,6 +41,10 @@ from app.models.fulfillment import FulfillmentLog
 from app.models.s3_connection import S3Connection
 from app.models.s3_object_metadata import S3ObjectMetadata
 from app.services.s3_broker_client import S3BrokerClient, S3BrokerError, S3BrokerNotActivatedError
+from app.services.source_artifact_resolver import (
+    ArtifactResolutionError,
+    resolve_source_artifact,
+)
 from app.services.trust_channel_client import TrustChannelClient, get_trust_channel_client
 
 logger = logging.getLogger(__name__)
@@ -124,9 +126,17 @@ class FulfillmentService:
         self._save_log(log_entry)
 
         try:
-            # 1. Look up dataset by listing_id
-            dataset, file_path = self._find_dataset(listing_id)
-            if dataset is None:
+            # 1. Resolve through the same listing-to-artifact path used by verification.
+            try:
+                artifact = resolve_source_artifact(
+                    listing_id,
+                    upload_directory=settings.upload_directory,
+                    processed_directory=settings.processed_directory,
+                    session_context_factory=get_session_context,
+                )
+            except ArtifactResolutionError:
+                artifact = None
+            if artifact is None:
                 await self._send_error(
                     transfer_id, order_id,
                     "DATASET_NOT_FOUND",
@@ -136,12 +146,14 @@ class FulfillmentService:
                                  error_message=f"No dataset for listing_id={listing_id}")
                 return
 
-            s3_object = self._find_s3_object(dataset)
-            if s3_object is not None:
+            dataset = artifact.dataset
+            file_path = artifact.local_path
+            if artifact.kind == "s3":
+                assert artifact.connection is not None and artifact.metadata is not None
                 await self._deliver_s3_object(
                     log_entry=log_entry,
-                    connection=s3_object[0],
-                    metadata=s3_object[1],
+                    connection=artifact.connection,
+                    metadata=artifact.metadata,
                     transfer_id=transfer_id,
                     order_id=order_id,
                     listing_id=listing_id,
@@ -481,40 +493,18 @@ class FulfillmentService:
           1. dataset_records.listing_id column
           2. Fallback: scan publish_result.json files in /data/processed/
         """
-        with get_session_context() as session:
-            # Primary: look up by listing_id column
-            stmt = select(DatasetRecord).where(DatasetRecord.listing_id == listing_id)
-            dataset = session.exec(stmt).first()
-
-            if dataset:
-                file_path = self._resolve_file_path(dataset)
-                return dataset, file_path
-
-            # Fallback: scan publish_result.json files
-            processed_dir = Path(settings.processed_directory)
-            if processed_dir.exists():
-                for result_file in processed_dir.glob("*/publish_result.json"):
-                    try:
-                        with open(result_file) as f:
-                            result = json.load(f)
-                        if result.get("listing_id") == listing_id:
-                            dataset_id = result_file.parent.name
-                            stmt2 = select(DatasetRecord).where(
-                                DatasetRecord.id == dataset_id
-                            )
-                            dataset = session.exec(stmt2).first()
-                            if dataset:
-                                # Backfill listing_id for future lookups
-                                dataset.listing_id = listing_id
-                                session.add(dataset)
-                                session.commit()
-                                session.refresh(dataset)
-                                file_path = self._resolve_file_path(dataset)
-                                return dataset, file_path
-                    except (json.JSONDecodeError, OSError):
-                        continue
-
-        return None, None
+        try:
+            artifact = resolve_source_artifact(
+                listing_id,
+                upload_directory=settings.upload_directory,
+                processed_directory=settings.processed_directory,
+                session_context_factory=get_session_context,
+            )
+        except ArtifactResolutionError:
+            return None, None
+        if artifact is None:
+            return None, None
+        return artifact.dataset, artifact.local_path
 
     def _find_s3_object(
         self, dataset: DatasetRecord
@@ -541,24 +531,14 @@ class FulfillmentService:
         Resolve the actual file path for a dataset.
         Prefers processed Parquet, falls back to original upload.
         """
-        # Try processed path first
         if dataset.processed_path and os.path.isfile(dataset.processed_path):
             return dataset.processed_path
-
-        # Try standard processed location
-        parquet_path = os.path.join(
-            settings.processed_directory, f"{dataset.id}.parquet"
-        )
+        parquet_path = os.path.join(settings.processed_directory, f"{dataset.id}.parquet")
         if os.path.isfile(parquet_path):
             return parquet_path
-
-        # Fall back to original upload
-        upload_path = os.path.join(
-            settings.upload_directory, dataset.storage_filename
-        )
+        upload_path = os.path.join(settings.upload_directory, dataset.storage_filename)
         if os.path.isfile(upload_path):
             return upload_path
-
         return None
 
     @staticmethod

@@ -2,6 +2,8 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+import jwt
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import HTTPException
 from starlette.requests import Request
 
@@ -12,6 +14,7 @@ from app.models.dataset import DatasetRecord as DBDatasetRecord
 from app.models.listing_metadata_schemas import ColumnSummary, ListingMetadata
 from app.routers import datasets
 from app.services import marketplace_push_service
+from app.services.marketplace_action_signer import build_action_jwt, canonical_payload_hash
 from app.services.processing_service import DatasetRecord, ProcessingStatus
 
 
@@ -22,6 +25,22 @@ def _request() -> Request:
         "path": "/api/datasets/ds-1/publish",
         "headers": [(b"authorization", b"Bearer seller-token")],
     })
+
+
+def test_generic_marketplace_action_signer_binds_action_and_canonical_payload_hash():
+    key = Ed25519PrivateKey.from_private_bytes(bytes([7]) * 32)
+    payload_hash = canonical_payload_hash({"b": 2, "a": 1})
+    token = build_action_jwt(
+        seller_id="seller-1",
+        install_id="install-1",
+        action="submit_data_verification_receipt",
+        payload_hash=payload_hash,
+        private_key=key,
+    )
+    claims = jwt.decode(token, key.public_key(), algorithms=["EdDSA"])
+    assert claims["action"] == "submit_data_verification_receipt"
+    assert claims["payload_hash"] == payload_hash
+    assert "metadata_hash" not in claims
 
 
 def _processing_record(dataset_id: str, *, status=ProcessingStatus.PREVIEW_READY) -> DatasetRecord:

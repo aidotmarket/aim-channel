@@ -10,15 +10,12 @@ The Ed25519 private key lives on VZ backend only.
 """
 
 import hashlib
-import json
 import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
-from uuid import uuid4
 
 import httpx
-import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -32,6 +29,11 @@ from app.models.s3_object_metadata import S3ObjectMetadata
 from app.models.s3_scan_job import S3ScanJob
 from app.services.registration_service import ensure_vz_install_registered
 from app.services.listing_versioning import build_version_prefix
+from app.services.marketplace_action_signer import (
+    build_action_jwt,
+    canonical_json_bytes,
+    canonical_payload_hash,
+)
 from app.services.processing_service import ProcessingService, get_processing_service
 from app.services.s3_publish_source_resolver import (
     NotS3PublishSource,
@@ -162,29 +164,24 @@ ATTESTATION_HASH_PATHS = {
 
 def _jcs_canonical_bytes(body: dict) -> bytes:
     """RFC 8785 JCS-style canonical bytes used by sender/backend parity tests."""
-    return json.dumps(
-        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    ).encode("utf-8")
+    return canonical_json_bytes(body)
 
 
 def _jcs_hash(body: dict) -> str:
     """RFC 8785 JCS-style canonical hash (sorted keys, compact separators)."""
-    return hashlib.sha256(_jcs_canonical_bytes(body)).hexdigest()
+    return canonical_payload_hash(body)
 
 
 def _build_jwt(seller_id: str, install_id: str, metadata_hash: str, ed_priv) -> str:
     """Create a short-lived EdDSA JWT for the publish action."""
-    now = datetime.now(timezone.utc)
-    claims = {
-        "sub": seller_id,
-        "iss": install_id,
-        "action": "publish_listing",
-        "metadata_hash": metadata_hash,
-        "exp": now.timestamp() + 300,
-        "iat": now.timestamp(),
-        "jti": str(uuid4()),
-    }
-    return jwt.encode(claims, ed_priv, algorithm="EdDSA")
+    return build_action_jwt(
+        seller_id=seller_id,
+        install_id=install_id,
+        action="publish_listing",
+        payload_hash=metadata_hash,
+        private_key=ed_priv,
+        hash_claim="metadata_hash",
+    )
 
 
 def _get_crypto() -> DeviceCrypto:

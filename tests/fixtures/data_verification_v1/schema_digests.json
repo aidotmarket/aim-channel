@@ -1,0 +1,11 @@
+{
+  "fixture_digest_algorithm": "sha256",
+  "fixture_digests": {
+    "hostile_d6.json": "b6aa1a62fc49284b7cf5235cafcaaaeb33260dbec00265d28a14e2a83e431b6e",
+    "report.json": "ccf73f9bfeff09cfb486940517257ce587cc73068a5da1986fda02a5df27a009",
+    "scan_spec.json": "5e4334d21955cb8f8ede53fcaf3a0072688f25f7a463241e9ab7586544c23bb5"
+  },
+  "install_fixture_public_key_base64": "gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q=",
+  "platform_fixture_public_key_base64": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=",
+  "status": "local_candidate_pending_chunk_1_digest_comparison"
+}

@@ -41,8 +41,12 @@ class DataVerificationRun(SQLModel, table=True):
     d8_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
     start_claimed: bool = Field(default=False, sa_column=Column(Boolean, nullable=False))
     scan_claimed: bool = Field(default=False, sa_column=Column(Boolean, nullable=False))
+    start_lease_owner_id: Optional[str] = Field(default=None, max_length=36)
+    start_lease_expires_at_utc: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
     withdraw_requested_at_utc: Optional[datetime] = Field(
-        default=None, sa_column=Column(DateTime(), nullable=True)
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
     withdrawn_at_utc: Optional[datetime] = Field(
         default=None, sa_column=Column(DateTime(), nullable=True)

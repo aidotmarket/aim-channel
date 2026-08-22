@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from math import ceil
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import update
+from sqlalchemy import or_, update
 from sqlmodel import select
 
 from app.core.database import get_session_context
@@ -46,7 +47,9 @@ CANCEL_STATES = {
     "AUTHORIZING", "AUTHORIZED", "SCANNING_LOCAL", "NARRATING_CLOUD",
     "CAPTURE_PENDING", "CAPTURE_RECONCILING",
 }
-CLAIM_WAIT_ATTEMPTS = 500
+START_LEASE_SECONDS = 30.0
+START_LEASE_HEARTBEAT_SECONDS = 5.0
+START_LEASE_POLL_SECONDS = 0.01
 
 
 class DataVerificationLocalError(RuntimeError):
@@ -320,21 +323,143 @@ def _claim(run_id: str, field: str) -> bool:
         return result.rowcount == 1
 
 
-async def _wait_for_run(
-    dataset_id: str, predicate: Any, *, message: str
+def _try_claim_start_lease(run_id: str, owner_id: str) -> bool:
+    now = _now_utc()
+    with get_session_context() as session:
+        result = session.exec(
+            update(DataVerificationRun)
+            .where(
+                DataVerificationRun.id == run_id,
+                DataVerificationRun.report_ingest_json.is_(None),
+                or_(
+                    DataVerificationRun.start_lease_owner_id.is_(None),
+                    DataVerificationRun.start_lease_expires_at_utc.is_(None),
+                    DataVerificationRun.start_lease_expires_at_utc <= now,
+                    DataVerificationRun.start_lease_owner_id == owner_id,
+                ),
+            )
+            .values(
+                start_lease_owner_id=owner_id,
+                start_lease_expires_at_utc=now
+                + timedelta(seconds=START_LEASE_SECONDS),
+                updated_at=now,
+            )
+        )
+        session.commit()
+        return result.rowcount == 1
+
+
+def _renew_start_lease(run_id: str, owner_id: str) -> bool:
+    now = _now_utc()
+    with get_session_context() as session:
+        result = session.exec(
+            update(DataVerificationRun)
+            .where(
+                DataVerificationRun.id == run_id,
+                DataVerificationRun.start_lease_owner_id == owner_id,
+            )
+            .values(
+                start_lease_expires_at_utc=now
+                + timedelta(seconds=START_LEASE_SECONDS),
+                updated_at=now,
+            )
+        )
+        session.commit()
+        return result.rowcount == 1
+
+
+def _release_start_lease(run_id: str, owner_id: str) -> None:
+    with get_session_context() as session:
+        session.exec(
+            update(DataVerificationRun)
+            .where(
+                DataVerificationRun.id == run_id,
+                DataVerificationRun.start_lease_owner_id == owner_id,
+            )
+            .values(
+                start_lease_owner_id=None,
+                start_lease_expires_at_utc=None,
+                updated_at=_now_utc(),
+            )
+        )
+        session.commit()
+
+
+async def _claim_start_lease_or_wait(
+    run_id: str, owner_id: str
+) -> tuple[DataVerificationRun, bool]:
+    while True:
+        with get_session_context() as session:
+            run = session.get(DataVerificationRun, run_id)
+        if run is None:
+            raise DataVerificationLocalError("verification run was not found")
+        lease_is_live = bool(
+            run.start_lease_owner_id
+            and run.start_lease_expires_at_utc
+            and _utc(run.start_lease_expires_at_utc) > _now_utc()
+        )
+        if run.report_ingest_json and not lease_is_live:
+            return run, False
+        if _try_claim_start_lease(run_id, owner_id):
+            with get_session_context() as session:
+                claimed = session.get(DataVerificationRun, run_id)
+            if claimed is None:
+                raise DataVerificationLocalError("verification run was not found")
+            return claimed, True
+        await asyncio.sleep(START_LEASE_POLL_SECONDS)
+
+
+def _assert_start_lease(run_id: str, owner_id: str) -> None:
+    if not _renew_start_lease(run_id, owner_id):
+        raise DataVerificationLocalError("verification start lease was lost")
+
+
+@asynccontextmanager
+async def _heartbeat_start_lease(run_id: str, owner_id: str):
+    stopped = asyncio.Event()
+    lost = asyncio.Event()
+
+    async def heartbeat() -> None:
+        while True:
+            try:
+                await asyncio.wait_for(
+                    stopped.wait(), timeout=START_LEASE_HEARTBEAT_SECONDS
+                )
+                return
+            except TimeoutError:
+                if not _renew_start_lease(run_id, owner_id):
+                    lost.set()
+                    return
+
+    task = asyncio.create_task(heartbeat())
+    try:
+        yield lost
+    finally:
+        stopped.set()
+        await task
+        _release_start_lease(run_id, owner_id)
+
+
+def _assert_heartbeat_lease(
+    run_id: str, owner_id: str, lost: asyncio.Event
+) -> None:
+    if lost.is_set():
+        raise DataVerificationLocalError("verification start lease was lost")
+    _assert_start_lease(run_id, owner_id)
+
+
+async def _sync_status(
+    run: DataVerificationRun,
+    client: DataVerificationClient,
+    *,
+    lease_owner_id: str | None = None,
+    lease_lost: asyncio.Event | None = None,
 ) -> DataVerificationRun:
-    for _ in range(CLAIM_WAIT_ATTEMPTS):
-        run = _latest_run(dataset_id)
-        if run and predicate(run):
-            return run
-        await asyncio.sleep(0.01)
-    raise DataVerificationLocalError(message)
-
-
-async def _sync_status(run: DataVerificationRun, client: DataVerificationClient) -> DataVerificationRun:
     if not run.verification_id:
         return run
     status = await client.status(run.verification_id)
+    if lease_owner_id and lease_lost:
+        _assert_heartbeat_lease(run.id, lease_owner_id, lease_lost)
     changes: dict[str, Any] = {
         "state": status.state,
         "payment_status_json": _dumps(status.model_dump(mode="json")),
@@ -351,16 +476,26 @@ async def _sync_status(run: DataVerificationRun, client: DataVerificationClient)
 
 
 async def _ingest_persisted_report(
-    run: DataVerificationRun, client: DataVerificationClient
+    run: DataVerificationRun,
+    client: DataVerificationClient,
+    *,
+    lease_owner_id: str,
+    lease_lost: asyncio.Event,
 ) -> DataVerificationRun:
     report = _loads(run.report_json)
     if report is None:
         raise DataVerificationLocalError("the persisted verification report is unavailable")
     ingest = await client.ingest_report(report)
+    _assert_heartbeat_lease(run.id, lease_owner_id, lease_lost)
     run = _save_run(
         run.id, report_ingest_json=_dumps(ingest.model_dump(mode="json"))
     )
-    return await _sync_status(run, client)
+    return await _sync_status(
+        run,
+        client,
+        lease_owner_id=lease_owner_id,
+        lease_lost=lease_lost,
+    )
 
 
 async def refresh(dataset_id: str, *, client: DataVerificationClient) -> DataVerificationView:
@@ -428,10 +563,47 @@ async def start(
             corpus_ack=request.corpus_ack,
         )
 
+    lease_owner_id = str(uuid4())
+    run, lease_acquired = await _claim_start_lease_or_wait(
+        run.id, lease_owner_id
+    )
+    if not lease_acquired:
+        if run.verification_id:
+            run = await _sync_status(run, client)
+        return _view(dataset, run)
+    async with _heartbeat_start_lease(run.id, lease_owner_id) as lease_lost:
+        return await _start_with_lease(
+            dataset,
+            run,
+            client=client,
+            scanner=scanner,
+            install_id=install_id,
+            install_private_key=install_private_key,
+            lease_owner_id=lease_owner_id,
+            lease_lost=lease_lost,
+        )
+
+
+async def _start_with_lease(
+    dataset: DatasetRecord,
+    run: DataVerificationRun,
+    *,
+    client: DataVerificationClient,
+    scanner: DataVerificationScanner,
+    install_id: str,
+    install_private_key: Any,
+    lease_owner_id: str,
+    lease_lost: asyncio.Event,
+) -> DataVerificationView:
     if run.report_ingest_json:
         return _view(dataset, run)
     if run.report_json:
-        run = await _ingest_persisted_report(run, client)
+        run = await _ingest_persisted_report(
+            run,
+            client,
+            lease_owner_id=lease_owner_id,
+            lease_lost=lease_lost,
+        )
         return _view(dataset, run)
 
     quote = QuoteResponse.model_validate_json(run.quote_json)
@@ -456,81 +628,32 @@ async def start(
         payment_disclosure_version="payment-disclosure-v1",
         authorization_usd=quote.hard_maximum.authorization_usd,
     )
-    spec_dict: dict[str, Any] | None = None
-    recover_scan_claim = False
-    if not run.verification_id:
-        if _claim(run.id, "start_claimed"):
-            spec = await client.start(issue)
-            spec_dict = spec.model_dump(mode="json")
-            run = _save_run(run.id, verification_id=spec.payload.verification_id)
-        else:
-            try:
-                run = await _wait_for_run(
-                    dataset_id,
-                    lambda candidate: bool(candidate.verification_id),
-                    message="the server start claim did not complete",
-                )
-            except DataVerificationLocalError:
-                spec = await client.start(issue)
-                spec_dict = spec.model_dump(mode="json")
-                run = _save_run(run.id, verification_id=spec.payload.verification_id)
-    if spec_dict is None:
-        completed: DataVerificationRun | None = None
-        try:
-            completed = await _wait_for_run(
-                dataset_id,
-                lambda candidate: bool(candidate.report_ingest_json),
-                message="the claimed verification start did not complete",
-            )
-        except DataVerificationLocalError:
-            pass
-        if completed is not None:
-            completed = await _sync_status(completed, client)
-            return _view(dataset, completed)
-        run = _latest_run(dataset_id)
-        if run is None:
-            raise DataVerificationLocalError("verification run was not found")
-        if run.report_ingest_json:
-            return _view(dataset, run)
-        if run.report_json:
-            run = await _ingest_persisted_report(run, client)
-            return _view(dataset, run)
-        spec = await client.start(issue)
-        if run.verification_id and run.verification_id != spec.payload.verification_id:
-            raise DataVerificationLocalError(
-                "the idempotent server start returned a different verification identity"
-            )
-        spec_dict = spec.model_dump(mode="json")
-        recover_scan_claim = run.scan_claimed
-        run = _save_run(run.id, verification_id=spec.payload.verification_id)
-    run = await _sync_status(run, client)
+    recover_scan_claim = run.scan_claimed
+    if not run.start_claimed and not _claim(run.id, "start_claimed"):
+        raise DataVerificationLocalError("the server start claim could not be acquired")
+    spec = await client.start(issue)
+    _assert_heartbeat_lease(run.id, lease_owner_id, lease_lost)
+    if run.verification_id and run.verification_id != spec.payload.verification_id:
+        raise DataVerificationLocalError(
+            "the idempotent server start returned a different verification identity"
+        )
+    spec_dict = spec.model_dump(mode="json")
+    run = _save_run(run.id, verification_id=spec.payload.verification_id)
+    run = await _sync_status(
+        run,
+        client,
+        lease_owner_id=lease_owner_id,
+        lease_lost=lease_lost,
+    )
     if run.state != "AUTHORIZED":
         return _view(dataset, run)
 
-    if not _claim(run.id, "scan_claimed") and not recover_scan_claim:
-        completed = None
-        try:
-            completed = await _wait_for_run(
-                dataset_id,
-                lambda candidate: bool(candidate.report_ingest_json),
-                message="the local scan claim did not complete",
-            )
-        except DataVerificationLocalError:
-            pass
-        if completed is not None:
-            completed = await _sync_status(completed, client)
-            return _view(dataset, completed)
-        run = _latest_run(dataset_id)
-        if run is None:
-            raise DataVerificationLocalError("verification run was not found")
-        if run.report_ingest_json:
-            return _view(dataset, run)
-        if run.report_json:
-            run = await _ingest_persisted_report(run, client)
-            return _view(dataset, run)
+    if not recover_scan_claim and not _claim(run.id, "scan_claimed"):
+        raise DataVerificationLocalError("the local scan claim could not be acquired")
 
     try:
-        execution = scanner.scan(
+        execution = await asyncio.to_thread(
+            scanner.scan,
             signed_spec=spec_dict,
             d6_candidate=json.loads(run.d6_json),
         )
@@ -543,14 +666,18 @@ async def start(
             install_private_key=install_private_key,
         )
         d8 = None
+    _assert_heartbeat_lease(run.id, lease_owner_id, lease_lost)
     run = _save_run(
         run.id,
         report_json=_dumps(report),
         d8_json=_dumps(d8) if d8 is not None else None,
     )
-    ingest = await client.ingest_report(report)
-    run = _save_run(run.id, report_ingest_json=_dumps(ingest.model_dump(mode="json")))
-    run = await _sync_status(run, client)
+    run = await _ingest_persisted_report(
+        run,
+        client,
+        lease_owner_id=lease_owner_id,
+        lease_lost=lease_lost,
+    )
     return _view(dataset, run)
 
 

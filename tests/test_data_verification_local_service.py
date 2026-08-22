@@ -383,20 +383,67 @@ async def test_concurrent_starts_share_one_epoch_and_one_scanner_execution(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_live_start_lease_heartbeats_past_initial_expiry_without_duplicate_ingest(
+    tmp_path, monkeypatch
+):
+    ingest_delay_seconds = 0.06
+    monkeypatch.setattr(local_service, "START_LEASE_SECONDS", 0.02)
+    monkeypatch.setattr(local_service, "START_LEASE_HEARTBEAT_SECONDS", 0.005)
+    monkeypatch.setattr(local_service, "START_LEASE_POLL_SECONDS", 0.001)
+    assert ingest_delay_seconds > local_service.START_LEASE_SECONDS
+
+    class SlowIngestClient(FakeClient):
+        async def ingest_report(self, report):
+            await asyncio.sleep(ingest_delay_seconds)
+            return await super().ingest_report(report)
+
+    dataset_id = make_dataset(tmp_path, monkeypatch)
+    client = SlowIngestClient()
+    scanner = FakeScanner(dataset_id)
+    await prepare_quote(dataset_id, prepare_body(), client=client)
+
+    first, second = await asyncio.gather(*(
+        start(
+            dataset_id,
+            request=start_body(),
+            client=client,
+            scanner=scanner,
+            install_id="install_fixture",
+            install_private_key=object(),
+        )
+        for _ in range(2)
+    ))
+
+    with get_session_context() as session:
+        runs = session.exec(
+            select(DataVerificationRun).where(
+                DataVerificationRun.dataset_id == dataset_id
+            )
+        ).all()
+    assert first.state == second.state == "CAPTURED"
+    assert first.report_ingest.accepted and second.report_ingest.accepted
+    assert first.findings is not None and second.findings is not None
+    assert len(runs) == 1
+    assert runs[0].start_lease_owner_id is None
+    assert runs[0].start_lease_expires_at_utc is None
+    assert client.start_calls == 1
+    assert scanner.calls == 1
+    assert client.ingest_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_retry_after_report_persistence_gap_ingests_without_rescanning(tmp_path, monkeypatch):
     class GapClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.ingest_attempts = 0
+
         async def ingest_report(self, report):
-            self.ingest_calls += 1
+            self.ingest_attempts += 1
             self.last_report = report
-            if self.ingest_calls == 1:
+            if self.ingest_attempts == 1:
                 raise RuntimeError("simulated ingest persistence gap")
-            return ReportIngestResponse(
-                verification_id=self.verification_id,
-                accepted=True,
-                narrative_state="grounded",
-                narrative="Grounded allAI narrative fixture.",
-                listing_claim_comparison="Listing claims match the deterministic scan fixture.",
-            )
+            return await super().ingest_report(report)
 
     dataset_id = make_dataset(tmp_path, monkeypatch)
     client = GapClient()
@@ -424,7 +471,8 @@ async def test_retry_after_report_persistence_gap_ingests_without_rescanning(tmp
     assert recovered.state == "CAPTURED"
     assert scanner.calls == 1
     assert client.start_calls == 1
-    assert client.ingest_calls == 2
+    assert client.ingest_attempts == 2
+    assert client.ingest_calls == 1
 
 
 @pytest.mark.asyncio
@@ -680,6 +728,10 @@ def _accepted_recovery_run(
         run.verification_id = verification_id
         run.start_claimed = start_claimed
         run.scan_claimed = scan_claimed
+        run.start_lease_owner_id = "dead-owner"
+        run.start_lease_expires_at_utc = datetime(
+            2026, 8, 22, 11, 59, tzinfo=timezone.utc
+        )
         session.add(run)
         session.commit()
         session.refresh(run)
@@ -709,8 +761,6 @@ async def test_restart_reexecutes_deterministic_scan_for_persisted_claims(
         start_claimed=True,
         scan_claimed=True,
     )
-    monkeypatch.setattr(local_service, "CLAIM_WAIT_ATTEMPTS", 1)
-
     recovered = await start(
         dataset_id,
         request=start_body(),
@@ -754,8 +804,6 @@ async def test_restart_recovers_start_claim_without_verification_identity(
         start_claimed=True,
         scan_claimed=False,
     )
-    monkeypatch.setattr(local_service, "CLAIM_WAIT_ATTEMPTS", 1)
-
     recovered = await start(
         dataset_id,
         request=start_body(),
@@ -807,7 +855,18 @@ async def test_restart_after_each_claim_compare_and_set_completes_once(
             install_private_key=object(),
         )
     monkeypatch.setattr(local_service, "_claim", original_claim)
-    monkeypatch.setattr(local_service, "CLAIM_WAIT_ATTEMPTS", 1)
+    with get_session_context() as session:
+        run = session.exec(
+            select(DataVerificationRun).where(
+                DataVerificationRun.dataset_id == dataset_id
+            )
+        ).one()
+        run.start_lease_owner_id = "dead-owner"
+        run.start_lease_expires_at_utc = datetime(
+            2026, 8, 22, 11, 59, tzinfo=timezone.utc
+        )
+        session.add(run)
+        session.commit()
 
     recovered = await start(
         dataset_id,

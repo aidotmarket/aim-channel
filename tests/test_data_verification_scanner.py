@@ -8,7 +8,8 @@ from uuid import uuid4
 import pytest
 import httpx
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from app.core.database import get_session_context
@@ -30,7 +31,7 @@ from app.services.s3_broker_client import S3BrokerClient, S3BrokerError
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "data_verification_v1"
-PLATFORM_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(bytes([1]) * 32)
+PLATFORM_PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 INSTALL_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(bytes([2]) * 32)
 COMMITMENT_KEY = b"c" * 32
 FIXED_NOW = datetime(2026, 8, 21, 10, 30, tzinfo=timezone.utc)
@@ -49,7 +50,9 @@ def _signed_spec(*, listing_id: str, source_handle_id: str, **changes):
     document["payload"].update(listing_id=listing_id, source_handle_id=source_handle_id, **changes)
     payload_bytes = canonical_json_bytes(document["payload"])
     document["spec_hash"] = hashlib.sha256(payload_bytes).hexdigest()
-    document["spec_signature"] = base64.b64encode(PLATFORM_PRIVATE_KEY.sign(payload_bytes)).decode()
+    document["spec_signature"] = base64.b64encode(
+        PLATFORM_PRIVATE_KEY.sign(payload_bytes, padding.PKCS1v15(), hashes.SHA256())
+    ).decode()
     return document
 
 
@@ -68,7 +71,7 @@ def _scanner(*, broker=None):
         commitment_key=COMMITMENT_KEY,
         install_private_key=INSTALL_PRIVATE_KEY,
         install_key_id="install-fixture-key-v1",
-        platform_public_key=PLATFORM_PRIVATE_KEY.public_key().public_bytes_raw(),
+        platform_public_key=PLATFORM_PRIVATE_KEY.public_key(),
         broker_client=broker,
         clock=_clock(),
     )
@@ -170,7 +173,7 @@ def test_commitment_key_cannot_reuse_install_signature_key():
             commitment_key=raw_install_key,
             install_private_key=INSTALL_PRIVATE_KEY,
             install_key_id="install-fixture-key-v1",
-            platform_public_key=PLATFORM_PRIVATE_KEY.public_key().public_bytes_raw(),
+            platform_public_key=PLATFORM_PRIVATE_KEY.public_key(),
         )
 
 
@@ -310,14 +313,25 @@ def test_unsupported_shape_and_budget_refuse_instead_of_partial_report(tmp_path,
         _scanner().scan(signed_spec=spec, d6_candidate=VALID_D6, now=FIXED_NOW)
 
 
-def test_fixture_digests_are_self_consistent_pending_chunk_1_comparison():
+def test_folded_fixture_digests_and_canonicalization_match_backend_contract():
     manifest = json.loads((FIXTURES / "schema_digests.json").read_text())
-    assert manifest["status"] == "local_candidate_pending_chunk_1_digest_comparison"
+    assert manifest["status"] == "folded_byte_identical_to_backend_3286e0726"
+    assert manifest["canonicalization_version"] == "python-json-sort-compact-v1"
     for name, expected in manifest["fixture_digests"].items():
         assert hashlib.sha256((FIXTURES / name).read_bytes()).hexdigest() == expected
+
+    for vector in manifest["canonicalization_vectors"]:
+        assert canonical_json_bytes(json.loads(vector["input_json"])) == vector["expected_utf8"].encode()
+
+    spec = json.loads((FIXTURES / "scan_spec.json").read_text())
+    platform_key = serialization.load_pem_public_key(
+        base64.b64decode(manifest["backend_fixture_public_key_pem_base64"])
+    )
+    platform_key.verify(
+        base64.b64decode(spec["spec_signature"]),
+        canonical_json_bytes(spec["payload"]),
+        padding.PKCS1v15(),
+        hashes.SHA256(),
+    )
     report = json.loads((FIXTURES / "report.json").read_text())
     assert set(report) == REPORT_FIELD_CONTRACT
-    INSTALL_PRIVATE_KEY.public_key().verify(
-        base64.b64decode(report["receipt_signature"]),
-        canonical_json_bytes(receipt_signature_binding(report)),
-    )

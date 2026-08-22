@@ -652,6 +652,15 @@ def create_app() -> FastAPI:
         dependencies=admin_route_dependency,
     )
 
+    # ADMIN ONLY — local orchestration for the S1590 seller flow.
+    from app.routers.data_verification import router as data_verification_router
+    app.include_router(
+        data_verification_router,
+        prefix="/api",
+        tags=["data-verification"],
+        dependencies=admin_route_dependency,
+    )
+
     # ADMIN ONLY — request engine (BQ-VZ-REQUEST-ENGINE Slice B)
     from app.routers.request_engine import router as request_engine_router
     app.include_router(

@@ -1,0 +1,53 @@
+{
+  "contract_version": "data-verification-lifecycle-client-v1",
+  "routes": {
+    "quote": {
+      "method": "POST",
+      "path_template": "/api/v1/data-verification/quote",
+      "expected_action": "data_verification_quote",
+      "response_schema": "QuoteResponse"
+    },
+    "start": {
+      "method": "POST",
+      "path_template": "/api/v1/data-verification/scan-spec",
+      "expected_action": "data_verification_start",
+      "response_schema": "SignedScanSpec"
+    },
+    "report_ingest": {
+      "method": "PUT",
+      "path_template": "/api/v1/data-verification/scan-spec",
+      "expected_action": null,
+      "response_schema": "ReportIngestResponse"
+    },
+    "status": {
+      "method": "GET",
+      "path_template": "/api/v1/data-verification/{verification_id}/status",
+      "expected_action": null,
+      "response_schema": "PaymentLifecycleStatus"
+    },
+    "cancel": {
+      "method": "POST",
+      "path_template": "/api/v1/data-verification/{verification_id}/cancel",
+      "expected_action": "data_verification_cancel",
+      "response_schema": "PaymentLifecycleStatus"
+    },
+    "publish": {
+      "method": "POST",
+      "path_template": "/api/v1/data-verification/{verification_id}/publish",
+      "expected_action": "data_verification_publish",
+      "response_schema": "PaymentLifecycleStatus"
+    },
+    "decline": {
+      "method": "POST",
+      "path_template": "/api/v1/data-verification/{verification_id}/decline",
+      "expected_action": "data_verification_decline",
+      "response_schema": "PaymentLifecycleStatus"
+    },
+    "withdraw": {
+      "method": "POST",
+      "path_template": "/api/v1/data-verification/{verification_id}/withdraw",
+      "expected_action": "data_verification_withdraw",
+      "response_schema": "PaymentLifecycleStatus"
+    }
+  }
+}

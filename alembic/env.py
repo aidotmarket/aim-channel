@@ -23,6 +23,7 @@ from app.models.user import User  # noqa: F401  BQ-VZ-MULTI-USER
 from app.models.connectivity import ConnectivityTokenRecord  # noqa: F401  BQ-MCP-RAG
 from app.models.raw_file import RawFile  # noqa: F401  BQ-VZ-RAW-LISTINGS
 from app.models.raw_listing import RawListing  # noqa: F401  BQ-VZ-RAW-LISTINGS
+from app.models.data_verification import DataVerificationRun  # noqa: F401  S1590
 from app.services.deduction_queue import deductions_metadata
 
 config = context.config

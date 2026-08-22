@@ -73,6 +73,7 @@ import { type ColumnSchema, type Dataset } from "@/types/mockDatasets";
 import { toast } from "@/hooks/use-toast";
 import PublishModal from "@/components/PublishModal";
 import ChatPanel from "@/components/copilot/ChatPanel";
+import { DataVerificationFlow } from "@/components/DataVerificationFlow";
 import { useMarketplace } from "@/contexts/MarketplaceContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { useMode } from "@/contexts/ModeContext";
@@ -1275,6 +1276,12 @@ export function ListingPreparation({
           </CardContent>
         </Card>
       )}
+
+      <DataVerificationFlow
+        datasetId={dataset.id}
+        sourceName={dataset.original_filename}
+        listingId={publishedListingId}
+      />
     </div>
   );
 }
@@ -1609,6 +1616,14 @@ const DatasetDetail = () => {
           </div>
         </div>
       </div>
+
+      {apiDataset.status === "preview_ready" && (
+        <DataVerificationFlow
+          datasetId={apiDataset.id}
+          sourceName={apiDataset.original_filename}
+          listingId={apiDataset.listing_id}
+        />
+      )}
 
       {/* Error/failed status message */}
       {dataset.status === "error" && (

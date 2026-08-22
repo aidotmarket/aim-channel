@@ -42,6 +42,14 @@ class ResolvedArtifact:
     metadata: Optional[S3ObjectMetadata] = None
     local_stat: Optional[tuple[int, int, int, int]] = None
 
+    def resolved_object_count(self) -> int:
+        """Return the number of exact marketplace-streamed objects this pin owns."""
+        if self.kind == "s3" and self.metadata is not None:
+            return len((self.metadata,))
+        if self.kind == "local" and self.local_path is not None:
+            return len((self.local_path,))
+        raise ArtifactResolutionError("resolved artifact is incomplete")
+
     def canonical_locator_bytes(self) -> bytes:
         """Return the exact locator for local HMAC use only."""
         if self.kind == "local" and self.local_path is not None:

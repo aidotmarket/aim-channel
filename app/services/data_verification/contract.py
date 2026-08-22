@@ -1,9 +1,4 @@
-"""Strict scan-spec v1 contract and canonicalization.
-
-Chunk 1 has not materialized the peer fixtures yet.  This is the local candidate
-derived from Gate 1 sections 3 and 6; cross-repository digest acceptance remains
-blocked until those fixtures exist and compare byte-for-byte.
-"""
+"""Strict scan-spec v1 contract and canonicalization."""
 
 from __future__ import annotations
 
@@ -13,7 +8,8 @@ from datetime import datetime, timezone
 from typing import Any, Literal, MutableSet, Optional
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.services.marketplace_action_signer import canonical_json_bytes
@@ -112,7 +108,7 @@ class ScanSpecPayload(StrictModel):
     traversal_root: Literal["registered_source_artifact"]
     traversal_order: Literal["canonical_object_identity_ascending"]
     fingerprint_algorithm: Literal["sha256"]
-    canonicalization_version: Literal["jcs-v1"]
+    canonicalization_version: Literal["python-json-sort-compact-v1"]
     approximate_distinct_algorithm: Literal["hll-sha256-v1"]
     deterministic_seed: str = Field(pattern=r"^[0-9a-f]{64}$")
     output_contract: Literal["data-verification-report-v1"]
@@ -151,14 +147,14 @@ class ScanSpecPayload(StrictModel):
 class SignedScanSpec(StrictModel):
     payload: ScanSpecPayload
     spec_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    signature_algorithm: Literal["Ed25519"]
-    spec_signature: str = Field(min_length=1, max_length=256)
+    signature_algorithm: Literal["RSASSA_PKCS1_V1_5_SHA256"]
+    spec_signature: str = Field(min_length=1, max_length=4096)
 
 
 def parse_and_verify_scan_spec(
     document: dict[str, Any],
     *,
-    platform_public_key: bytes | Ed25519PublicKey,
+    platform_public_key: bytes | rsa.RSAPublicKey,
     now: Optional[datetime] = None,
     seen_nonces: Optional[MutableSet[str]] = None,
 ) -> ScanSpecPayload:
@@ -175,13 +171,13 @@ def parse_and_verify_scan_spec(
         raise ContractError("scan spec hash is invalid")
     try:
         signature = base64.b64decode(spec.spec_signature, validate=True)
-        key = (
-            platform_public_key
-            if isinstance(platform_public_key, Ed25519PublicKey)
-            else Ed25519PublicKey.from_public_bytes(platform_public_key)
-        )
-        key.verify(signature, payload_bytes)
-    except (ValueError, InvalidSignature) as exc:
+        key = platform_public_key
+        if isinstance(platform_public_key, bytes):
+            key = serialization.load_pem_public_key(platform_public_key)
+        if not isinstance(key, rsa.RSAPublicKey):
+            raise ValueError("platform key is not RSA")
+        key.verify(signature, payload_bytes, padding.PKCS1v15(), hashes.SHA256())
+    except (TypeError, ValueError, InvalidSignature) as exc:
         raise ContractError("scan spec signature is invalid") from exc
 
     current = now or datetime.now(timezone.utc)

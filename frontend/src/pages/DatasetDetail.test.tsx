@@ -13,6 +13,10 @@ vi.mock("@/contexts/CoPilotContext", () => ({
   }),
 }));
 
+vi.mock("@/components/DataVerificationFlow", () => ({
+  DataVerificationFlow: ({ datasetId }: { datasetId: string }) => <div data-testid="data-verification-flow">Verification for {datasetId}</div>,
+}));
+
 const listingMetadata: DatasetListingMetadata = {
   title: "Customer Spend",
   description: "Buyer-facing customer spend data.",
@@ -102,6 +106,8 @@ describe("seller listing preparation", () => {
     vi.spyOn(datasetsApi, "getListingMetadata").mockResolvedValue(listingMetadata);
 
     renderPreparation(dataset());
+
+    expect(screen.getByTestId("data-verification-flow")).toHaveTextContent("ds-1");
 
     const continueButton = await screen.findByRole("button", { name: "Continue to metadata" });
     await waitFor(() => expect(continueButton).toBeEnabled());

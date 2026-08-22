@@ -288,6 +288,81 @@ export interface UploadResponse {
   status: string;
 }
 
+export type DataVerificationPaymentState =
+  | 'CREATED' | 'QUOTED' | 'AUTHORIZING' | 'AUTHORIZED' | 'SCANNING_LOCAL'
+  | 'NARRATING_CLOUD' | 'CAPTURE_PENDING' | 'CAPTURE_RECONCILING' | 'CAPTURED'
+  | 'PUBLISHED' | 'DECLINED' | 'WITHDRAWN' | 'SUPERSEDED' | 'AUTH_FAILED'
+  | 'CANCELLED_VOIDED' | 'FAILED_VOIDED' | 'CAPTURE_FAILED';
+
+export interface DataVerificationD6 {
+  domain_class: string;
+  record_granularity: string;
+  temporal_scope: string;
+  update_cadence: string;
+  intended_use_tags: string[];
+  known_limitation_tags: string[];
+}
+
+export interface DataVerificationQuote {
+  quote_id: string;
+  depth_class: 'complete_standard_v1';
+  traversal_scope: 'all_reachable_supported_objects';
+  row_count_policy: 'exact_or_declared_estimate';
+  low_occupancy_behavior: 'suppressed_low_occupancy';
+  minimum_aggregate_occupancy: 10;
+  hard_maximum: {
+    authorization_usd: string;
+    inference: { max_input_tokens: 8192; max_output_tokens: 1024; model_request_count: 1 };
+  };
+  partial_traversal_allowed: false;
+}
+
+export interface DataVerificationPaymentStatus {
+  verification_id: string;
+  state: DataVerificationPaymentState;
+  authorization_usd: string | null;
+  captured_usd: string | null;
+  result_available: boolean;
+  publication_allowed: boolean;
+  reconciliation_required: boolean;
+}
+
+export interface DataVerificationView {
+  dataset_id: string;
+  supported: boolean;
+  unavailable_reason: string | null;
+  run_id: string | null;
+  listing_id: string | null;
+  state: DataVerificationPaymentState | null;
+  d6_description: DataVerificationD6 | null;
+  preview_requested: boolean;
+  quote: DataVerificationQuote | null;
+  payment_status: DataVerificationPaymentStatus | null;
+  report_ingest: { verification_id: string; accepted: true; terminal_error_code: string | null; narrative_state: 'grounded' | 'withheld_grounding_failed' | null } | null;
+  findings: Record<string, unknown> | null;
+  d8_preview: Array<Record<string, unknown>> | null;
+  active_publication: { verification_id: string; scan_date: string; coverage: Record<string, unknown>; narrative_state: string | null } | null;
+}
+
+export const dataVerificationApi = {
+  get: (datasetId: string) => apiFetch<DataVerificationView>(`/api/data-verification/${datasetId}`),
+  quote: (datasetId: string, body: {
+    d6_description: DataVerificationD6;
+    preview_requested: boolean;
+    publication_terms_ack: true;
+    corpus_ack: true;
+  }) => apiFetch<DataVerificationView>(`/api/data-verification/${datasetId}/quote`, {
+    method: 'POST', body: JSON.stringify(body),
+  }),
+  start: (datasetId: string) => apiFetch<DataVerificationView>(`/api/data-verification/${datasetId}/start`, {
+    method: 'POST', body: JSON.stringify({ accept_quote: true }),
+  }),
+  command: (datasetId: string, action: 'cancel' | 'publish' | 'decline' | 'withdraw') =>
+    apiFetch<DataVerificationView>(`/api/data-verification/${datasetId}/${action}`, {
+      method: 'POST', body: JSON.stringify({ confirmed: true }),
+    }),
+};
+
 export interface RawFile {
   id: string;
   filename: string;

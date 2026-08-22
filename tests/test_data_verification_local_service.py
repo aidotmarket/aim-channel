@@ -1,5 +1,8 @@
+import asyncio
+import io
 import json
-from datetime import timedelta
+import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
@@ -15,6 +18,7 @@ from app.schemas.data_verification import (
     PrepareVerificationRequest,
     QuoteResponse,
     ReportIngestResponse,
+    StartVerificationRequest,
 )
 from app.services import source_artifact_resolver as resolver
 from app.services.data_verification.contract import SignedScanSpec
@@ -27,6 +31,7 @@ from app.services.data_verification_local_service import (
     refresh,
     start,
 )
+from app.services.data_verification_client import LifecycleCommandResult
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "data_verification_v1"
@@ -76,9 +81,11 @@ class FakeClient:
         self.commands = []
         self.verification_id = VERIFICATION_ID
         self.last_report = None
+        self.last_probe = None
 
-    async def quote(self, _probe):
+    async def quote(self, probe):
         self.quote_calls += 1
+        self.last_probe = probe
         return QuoteResponse.model_validate({
             "quote_id": "quote_fixture",
             "depth_class": "complete_standard_v1",
@@ -136,14 +143,17 @@ class FakeClient:
     async def command(self, command):
         self.commands.append(command)
         state = {"publish": "PUBLISHED", "decline": "DECLINED", "withdraw": "WITHDRAWN", "cancel": "CANCELLED_VOIDED"}[command.requested_action]
-        return PaymentLifecycleStatus(
-            verification_id=self.verification_id,
-            state=state,
-            authorization_usd="25.00",
-            captured_usd="1.23" if command.requested_action != "cancel" else None,
-            result_available=state == "PUBLISHED",
-            publication_allowed=False,
-            reconciliation_required=False,
+        return LifecycleCommandResult(
+            status=PaymentLifecycleStatus(
+                verification_id=self.verification_id,
+                state=state,
+                authorization_usd="25.00",
+                captured_usd="1.23" if command.requested_action != "cancel" else None,
+                result_available=state == "PUBLISHED",
+                publication_allowed=False,
+                reconciliation_required=False,
+            ),
+            server_date_utc=datetime(2026, 8, 22, 18, 30, tzinfo=timezone.utc),
         )
 
 
@@ -181,6 +191,12 @@ def prepare_body():
     return PrepareVerificationRequest(
         d6_description=VALID_D6,
         preview_requested=True,
+    )
+
+
+def start_body():
+    return StartVerificationRequest(
+        accept_quote=True,
         publication_terms_ack=True,
         corpus_ack=True,
     )
@@ -197,6 +213,7 @@ async def test_quote_start_capture_resume_and_publish_are_idempotent(tmp_path, m
     assert quoted.quote.hard_maximum.authorization_usd == 25
     captured = await start(
         dataset_id,
+        request=start_body(),
         client=client,
         scanner=scanner,
         install_id="install_fixture",
@@ -205,6 +222,17 @@ async def test_quote_start_capture_resume_and_publish_are_idempotent(tmp_path, m
     assert captured.state == "CAPTURED"
     assert captured.findings is not None
     assert captured.d8_preview is not None
+    assert (client.start_calls, client.ingest_calls, scanner.calls) == (1, 1, 1)
+
+    duplicate = await start(
+        dataset_id,
+        request=start_body(),
+        client=client,
+        scanner=scanner,
+        install_id="install_fixture",
+        install_private_key=object(),
+    )
+    assert duplicate.payment_status.verification_id == captured.payment_status.verification_id
     assert (client.start_calls, client.ingest_calls, scanner.calls) == (1, 1, 1)
 
     resumed = await refresh(dataset_id, client=client)
@@ -222,6 +250,7 @@ async def test_reconciliation_hides_local_findings_and_blocks_publication(tmp_pa
     await prepare_quote(dataset_id, prepare_body(), client=client)
     view = await start(
         dataset_id,
+        request=start_body(),
         client=client,
         scanner=FakeScanner(dataset_id),
         install_id="install_fixture",
@@ -238,16 +267,22 @@ async def test_rerun_creates_fresh_acknowledgements_and_preserves_active_publica
     dataset_id = make_dataset(tmp_path, monkeypatch)
     client = FakeClient()
     await prepare_quote(dataset_id, prepare_body(), client=client)
-    await start(dataset_id, client=client, scanner=FakeScanner(dataset_id), install_id="install_fixture", install_private_key=object())
+    await start(dataset_id, request=start_body(), client=client, scanner=FakeScanner(dataset_id), install_id="install_fixture", install_private_key=object())
     await lifecycle_command(dataset_id, "publish", client=client)
 
     rerun = await prepare_quote(dataset_id, prepare_body(), client=client)
     assert rerun.state == "QUOTED"
     assert rerun.active_publication is not None
+    assert rerun.active_publication["publication_state"] == "PUBLISHED"
+    assert rerun.active_publication["report"] == client.last_report
+    assert rerun.active_publication["d8_preview"] == [{"row_count": 12, "row_count_method": "exact"}]
+    assert rerun.active_publication["captured_usd"] == "1.23"
     with get_session_context() as session:
         runs = session.exec(select(DataVerificationRun).where(DataVerificationRun.dataset_id == dataset_id)).all()
     assert len(runs) == 2
-    assert all(run.publication_terms_ack and run.corpus_ack for run in runs)
+    assert runs[0].publication_terms_ack and runs[0].corpus_ack
+    assert not runs[1].publication_terms_ack and not runs[1].corpus_ack
+    assert runs[1].accepted_at_utc is None
 
 
 def test_feature_flag_and_unsupported_connector_fail_closed(tmp_path, monkeypatch):
@@ -282,6 +317,7 @@ async def test_local_failure_sends_only_bounded_terminal_report_and_hides_result
     await prepare_quote(dataset_id, prepare_body(), client=client)
     view = await start(
         dataset_id,
+        request=start_body(),
         client=client,
         scanner=RefusingScanner(),
         install_id="install_fixture",
@@ -293,3 +329,129 @@ async def test_local_failure_sends_only_bounded_terminal_report_and_hides_result
     transmitted = json.dumps(client.last_report)
     assert "private/source.csv" not in transmitted
     assert "could not be decoded" not in transmitted
+
+
+@pytest.mark.asyncio
+async def test_concurrent_starts_share_one_epoch_and_one_scanner_execution(tmp_path, monkeypatch):
+    class DelayedClient(FakeClient):
+        async def start(self, request):
+            await asyncio.sleep(0)
+            return await super().start(request)
+
+        async def status(self, verification_id):
+            await asyncio.sleep(0)
+            return await super().status(verification_id)
+
+        async def ingest_report(self, report):
+            await asyncio.sleep(0)
+            return await super().ingest_report(report)
+
+    dataset_id = make_dataset(tmp_path, monkeypatch)
+    client = DelayedClient()
+    scanner = FakeScanner(dataset_id)
+    await prepare_quote(dataset_id, prepare_body(), client=client)
+
+    first, second = await asyncio.gather(*(
+        start(
+            dataset_id,
+            request=start_body(),
+            client=client,
+            scanner=scanner,
+            install_id="install_fixture",
+            install_private_key=object(),
+        )
+        for _ in range(2)
+    ))
+
+    assert first.payment_status.verification_id == second.payment_status.verification_id
+    assert client.start_calls == 1
+    assert scanner.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_after_report_persistence_gap_ingests_without_rescanning(tmp_path, monkeypatch):
+    class GapClient(FakeClient):
+        async def ingest_report(self, report):
+            self.ingest_calls += 1
+            self.last_report = report
+            if self.ingest_calls == 1:
+                raise RuntimeError("simulated ingest persistence gap")
+            return ReportIngestResponse(
+                verification_id=self.verification_id,
+                accepted=True,
+                narrative_state="grounded",
+            )
+
+    dataset_id = make_dataset(tmp_path, monkeypatch)
+    client = GapClient()
+    scanner = FakeScanner(dataset_id)
+    await prepare_quote(dataset_id, prepare_body(), client=client)
+
+    with pytest.raises(RuntimeError, match="persistence gap"):
+        await start(
+            dataset_id,
+            request=start_body(),
+            client=client,
+            scanner=scanner,
+            install_id="install_fixture",
+            install_private_key=object(),
+        )
+    recovered = await start(
+        dataset_id,
+        request=start_body(),
+        client=client,
+        scanner=scanner,
+        install_id="install_fixture",
+        install_private_key=object(),
+    )
+
+    assert recovered.state == "CAPTURED"
+    assert scanner.calls == 1
+    assert client.start_calls == 1
+    assert client.ingest_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_quote_precedes_stored_acceptance_and_zip_probe_is_honest(tmp_path, monkeypatch):
+    dataset_id = make_dataset(tmp_path, monkeypatch, suffix="zip")
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w") as archive:
+        archive.writestr("a.csv", "id\n1\n")
+        archive.writestr("b.csv", "id\n2\n")
+    (tmp_path / "uploads" / "source.zip").write_bytes(archive_bytes.getvalue())
+    client = FakeClient()
+
+    quoted = await prepare_quote(dataset_id, prepare_body(), client=client)
+    assert quoted.quote_probe.objects_discovered == 2
+    assert client.last_probe.objects_discovered == 2
+    with get_session_context() as session:
+        run = session.exec(
+            select(DataVerificationRun).where(DataVerificationRun.dataset_id == dataset_id)
+        ).one()
+        assert run.accepted_at_utc is None
+        assert run.publication_terms_ack is False
+        assert run.corpus_ack is False
+
+
+@pytest.mark.asyncio
+async def test_published_to_withdrawn_persists_server_authoritative_marker_date(tmp_path, monkeypatch):
+    dataset_id = make_dataset(tmp_path, monkeypatch)
+    client = FakeClient()
+    await prepare_quote(dataset_id, prepare_body(), client=client)
+    await start(
+        dataset_id,
+        request=start_body(),
+        client=client,
+        scanner=FakeScanner(dataset_id),
+        install_id="install_fixture",
+        install_private_key=object(),
+    )
+    await lifecycle_command(dataset_id, "publish", client=client)
+    withdrawn = await lifecycle_command(dataset_id, "withdraw", client=client)
+
+    assert withdrawn.state == "WITHDRAWN"
+    assert withdrawn.active_publication == {
+        "publication_state": "WITHDRAWN",
+        "verification_id": client.verification_id,
+        "withdrawn_at_utc": "2026-08-22T18:30:00Z",
+    }

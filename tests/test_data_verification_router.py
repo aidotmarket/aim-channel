@@ -12,6 +12,7 @@ from sqlmodel import SQLModel
 from app.auth.api_key_auth import AuthenticatedUser, get_current_user
 from app.core.database import get_engine, get_session_context
 from app.models.dataset import DatasetRecord
+from app.models.data_verification import DataVerificationRun
 from app.routers.data_verification import router
 from app.schemas.data_verification import LifecycleCommand, QuoteProbeRequest, ScanSpecIssueRequest
 from app.services.data_verification_client import DataVerificationClient
@@ -56,7 +57,7 @@ async def test_lifecycle_client_contract_paths_claims_and_canonical_payloads():
                 "terminal_error_code": None,
                 "narrative_state": "grounded",
             })
-        return httpx.Response(200, json={
+        return httpx.Response(200, headers={"Date": "Sat, 22 Aug 2026 18:30:00 GMT"}, json={
             "verification_id": VERIFICATION_ID,
             "state": "CAPTURED",
             "authorization_usd": "25.00",
@@ -147,21 +148,53 @@ async def test_client_does_not_reflect_backend_response_body():
 
 
 @pytest.mark.asyncio
-async def test_local_router_is_disabled_by_default_and_confirmation_is_never_prechecked(monkeypatch):
+async def test_disabled_flag_projects_only_identity_support_and_reason_on_every_route(monkeypatch):
     monkeypatch.setenv("DATA_VERIFICATION_ENABLED", "false")
     SQLModel.metadata.create_all(get_engine())
-    dataset_id = "router-s1590-fixture"
+    dataset_ids = ("router-s1590-captured", "router-s1590-published")
     with get_session_context() as session:
-        if session.get(DatasetRecord, dataset_id) is None:
-            session.add(DatasetRecord(
-                id=dataset_id,
-                original_filename="source.csv",
-                storage_filename="source.csv",
-                file_type="csv",
-                status="preview_ready",
-                listing_id=LISTING_ID,
-            ))
-            session.commit()
+        for dataset_id, state in zip(dataset_ids, ("CAPTURED", "PUBLISHED"), strict=True):
+            if session.get(DatasetRecord, dataset_id) is None:
+                session.add(DatasetRecord(
+                    id=dataset_id,
+                    original_filename="source.csv",
+                    storage_filename="source.csv",
+                    file_type="csv",
+                    status="preview_ready",
+                    listing_id=LISTING_ID,
+                ))
+                session.add(DataVerificationRun(
+                    dataset_id=dataset_id,
+                    listing_id=LISTING_ID,
+                    source_handle_id=dataset_id,
+                    verification_id=f"verification_{state.lower()}",
+                    state=state,
+                    idempotency_key=f"idempotency_{state.lower()}",
+                    owner_authorization_id=f"authorization_{state.lower()}",
+                    accepted_at_utc=datetime(2026, 8, 22, tzinfo=timezone.utc),
+                    preview_requested=True,
+                    publication_terms_ack=True,
+                    corpus_ack=True,
+                    d6_json=json.dumps({
+                        "domain_class": "education_learning",
+                        "record_granularity": "entity",
+                        "temporal_scope": "current_snapshot",
+                        "update_cadence": "one_time",
+                        "intended_use_tags": [],
+                        "known_limitation_tags": [],
+                    }),
+                    probe_json=json.dumps({
+                        "source_reachable": True,
+                        "objects_discovered": 1,
+                        "fixed_reason_skips": {},
+                        "size_class": "small",
+                    }),
+                    quote_json=json.dumps({"sensitive_quote": "must-not-render"}),
+                    payment_status_json=json.dumps({"sensitive_payment": "must-not-render"}),
+                    report_json=json.dumps({"sensitive_findings": "must-not-render"}),
+                    d8_json=json.dumps([{"sensitive_d8": "must-not-render"}]),
+                ))
+        session.commit()
     app = FastAPI()
     app.include_router(router, prefix="/api")
     app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(
@@ -169,9 +202,33 @@ async def test_local_router_is_disabled_by_default_and_confirmation_is_never_pre
     )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(f"/api/data-verification/{dataset_id}")
-        assert response.status_code == 200
-        assert response.json()["supported"] is False
-        assert "not enabled" in response.json()["unavailable_reason"]
-        response = await client.post(f"/api/data-verification/{dataset_id}/publish", json={"confirmed": False})
-        assert response.status_code == 422
+        for dataset_id in dataset_ids:
+            expected = {
+                "dataset_id": dataset_id,
+                "supported": False,
+                "unavailable_reason": "Data verification is not enabled on this AIM Data installation.",
+            }
+            calls = (
+                ("GET", f"/api/data-verification/{dataset_id}", None),
+                ("POST", f"/api/data-verification/{dataset_id}/quote", {
+                    "d6_description": {
+                        "domain_class": "education_learning",
+                        "record_granularity": "entity",
+                        "temporal_scope": "current_snapshot",
+                        "update_cadence": "one_time",
+                        "intended_use_tags": [],
+                        "known_limitation_tags": [],
+                    },
+                    "preview_requested": True,
+                }),
+                ("POST", f"/api/data-verification/{dataset_id}/start", {
+                    "accept_quote": True,
+                    "publication_terms_ack": True,
+                    "corpus_ack": True,
+                }),
+                ("POST", f"/api/data-verification/{dataset_id}/publish", {"confirmed": True}),
+            )
+            for method, path, body in calls:
+                response = await client.request(method, path, json=body)
+                assert response.status_code == 200
+                assert response.json() == expected

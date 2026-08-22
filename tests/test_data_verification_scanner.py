@@ -18,7 +18,6 @@ from app.models.s3_connection import S3Connection
 from app.models.s3_object_metadata import S3ObjectMetadata
 from app.models.s3_scan_job import S3ScanJob
 from app.services import source_artifact_resolver as resolver
-from app.services.data_verification.connectors.eolymp_v1 import EolympConnectorV1
 from app.services.data_verification.contract import ContractError, REPORT_FIELD_CONTRACT
 from app.services.data_verification.scanner import (
     DataVerificationScanner,
@@ -335,3 +334,21 @@ def test_folded_fixture_digests_and_canonicalization_match_backend_contract():
     )
     report = json.loads((FIXTURES / "report.json").read_text())
     assert set(report) == REPORT_FIELD_CONTRACT
+    receipt_integrity = (
+        canonical_json_bytes(receipt_signature_binding(report))
+        + b"\0"
+        + base64.b64decode(report["receipt_signature"])
+    )
+    assert hashlib.sha256(receipt_integrity).hexdigest() == manifest[
+        "backend_fixture_receipt_integrity_sha256"
+    ]
+    mutated_binding = receipt_signature_binding(report)
+    mutated_binding["fingerprint_hash"] = "0" * 64
+    mutated_integrity = (
+        canonical_json_bytes(mutated_binding)
+        + b"\0"
+        + base64.b64decode(report["receipt_signature"])
+    )
+    assert hashlib.sha256(mutated_integrity).hexdigest() != manifest[
+        "backend_fixture_receipt_integrity_sha256"
+    ]

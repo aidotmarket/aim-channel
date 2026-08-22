@@ -234,6 +234,9 @@ def test_local_and_mocked_broker_streams_produce_same_fingerprint(tmp_path, monk
         session.add(job)
         session.add(metadata)
         session.commit()
+    resolved = resolver.resolve_source_artifact(local_listing)
+    assert resolved is not None
+    assert resolved.resolved_object_count() == 1
     broker = _Broker(payload=payload)
     remote = _scanner(broker=broker).scan(signed_spec=spec, d6_candidate=VALID_D6, now=FIXED_NOW)
     assert local.report["content_sha256"] == remote.report["content_sha256"]

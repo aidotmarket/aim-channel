@@ -191,8 +191,7 @@ def _probe(
             raise DataVerificationLocalError("registered listing source is not fully supported") from exc
     elif artifact.metadata is not None:
         size_bytes = int(artifact.metadata.size_bytes or 0)
-        # The registered S3 resolver pins exactly one marketplace-streamed object.
-        objects_discovered = 1
+        objects_discovered = artifact.resolved_object_count()
     else:
         raise DataVerificationLocalError("registered listing source is unavailable")
     size_class = "small" if size_bytes < 10_000_000 else "medium" if size_bytes < 100_000_000 else "large"

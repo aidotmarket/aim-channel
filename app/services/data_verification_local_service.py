@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import ceil
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from sqlalchemy import update
 from sqlmodel import select
 
 from app.core.database import get_session_context
@@ -22,12 +24,15 @@ from app.schemas.data_verification import (
     PaymentLifecycleStatus,
     PrepareVerificationRequest,
     QuoteProbeRequest,
+    QuoteProbeView,
     QuoteResponse,
     ReportIngestResponse,
     ScanSpecIssueRequest,
+    StartVerificationRequest,
 )
 from app.services.data_verification.scanner import DataVerificationScanner, ScanRefusedError
 from app.services.data_verification_client import DataVerificationClient
+from app.services.data_verification.connectors.eolymp_v1 import probe_object_count
 from app.services.marketplace_action_signer import canonical_json_bytes, sign_receipt_payload
 from app.services.source_artifact_resolver import resolve_source_artifact
 
@@ -72,6 +77,10 @@ def _latest_run(dataset_id: str) -> DataVerificationRun | None:
         ).first()
 
 
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
 def _active_publication(dataset_id: str) -> dict[str, Any] | None:
     with get_session_context() as session:
         runs = session.exec(
@@ -81,14 +90,24 @@ def _active_publication(dataset_id: str) -> dict[str, Any] | None:
         ).all()
     for run in runs:
         if run.state == "WITHDRAWN":
+            if run.withdrawn_at_utc and datetime.now(timezone.utc) - _utc(run.withdrawn_at_utc) <= timedelta(days=30):
+                return {
+                    "publication_state": "WITHDRAWN",
+                    "verification_id": run.verification_id,
+                    "withdrawn_at_utc": _utc(run.withdrawn_at_utc).isoformat().replace("+00:00", "Z"),
+                }
             return None
         if run.state == "PUBLISHED" and run.report_json:
             report = _loads(run.report_json)
+            payment = _loads(run.payment_status_json) or {}
             return {
+                "publication_state": "PUBLISHED",
                 "verification_id": run.verification_id,
                 "scan_date": report.get("completed_at_utc"),
-                "coverage": report.get("coverage"),
-                "narrative_state": (_loads(run.report_ingest_json) or {}).get("narrative_state"),
+                "report": report,
+                "report_ingest": _loads(run.report_ingest_json),
+                "d8_preview": _loads(run.d8_json),
+                "captured_usd": payment.get("captured_usd"),
             }
     return None
 
@@ -97,8 +116,11 @@ def _view(dataset: DatasetRecord, run: DataVerificationRun | None) -> DataVerifi
     supported = dataset.status == "preview_ready" and dataset.original_filename.lower().endswith(SUPPORTED_SUFFIXES)
     unavailable = None
     if not data_verification_enabled():
-        supported = False
-        unavailable = "Data verification is not enabled on this AIM Data installation."
+        return DataVerificationView(
+            dataset_id=dataset.id,
+            supported=False,
+            unavailable_reason="Data verification is not enabled on this AIM Data installation.",
+        )
     elif dataset.status != "preview_ready":
         unavailable = "Finish processing this dataset before starting data verification."
     elif not dataset.original_filename.lower().endswith(SUPPORTED_SUFFIXES):
@@ -118,6 +140,7 @@ def _view(dataset: DatasetRecord, run: DataVerificationRun | None) -> DataVerifi
         state=(payment_status.state if payment_status else run.state) if run else None,
         d6_description=D6Description.model_validate_json(run.d6_json) if run else None,
         preview_requested=run.preview_requested if run else False,
+        quote_probe=(QuoteProbeView.model_validate_json(run.probe_json) if run else None),
         quote=QuoteResponse.model_validate_json(run.quote_json) if run and run.quote_json else None,
         payment_status=payment_status,
         report_ingest=(ReportIngestResponse.model_validate_json(run.report_ingest_json) if run and run.report_ingest_json else None),
@@ -141,7 +164,9 @@ def requires_cloud_refresh(dataset_id: str) -> bool:
     return bool(run and run.verification_id)
 
 
-def _probe(dataset: DatasetRecord, preview_requested: bool) -> QuoteProbeRequest:
+def _probe(
+    dataset: DatasetRecord, preview_requested: bool
+) -> tuple[QuoteProbeRequest, QuoteProbeView]:
     if not dataset.listing_id:
         raise DataVerificationLocalError("listing registration is required")
     try:
@@ -156,11 +181,18 @@ def _probe(dataset: DatasetRecord, preview_requested: bool) -> QuoteProbeRequest
         raise DataVerificationLocalError("registered listing source is unavailable")
     if artifact.kind == "local" and artifact.local_path:
         try:
-            size_bytes = Path(artifact.local_path).stat().st_size
+            path = Path(artifact.local_path)
+            payload = path.read_bytes()
+            size_bytes = len(payload)
+            objects_discovered = probe_object_count(path.name, payload)
         except OSError as exc:
             raise DataVerificationLocalError("registered listing source is unavailable") from exc
+        except ValueError as exc:
+            raise DataVerificationLocalError("registered listing source is not fully supported") from exc
     elif artifact.metadata is not None:
         size_bytes = int(artifact.metadata.size_bytes or 0)
+        # The registered S3 resolver pins exactly one marketplace-streamed object.
+        objects_discovered = 1
     else:
         raise DataVerificationLocalError("registered listing source is unavailable")
     size_class = "small" if size_bytes < 10_000_000 else "medium" if size_bytes < 100_000_000 else "large"
@@ -170,14 +202,14 @@ def _probe(dataset: DatasetRecord, preview_requested: bool) -> QuoteProbeRequest
         metadata = {}
     columns = int(metadata.get("column_count") or len(metadata.get("columns") or []) or 1)
     estimated_tokens = max(1, ceil((1024 + columns * 640) / 3))
-    return QuoteProbeRequest(
+    probe = QuoteProbeRequest(
         listing_id=listing_id,
         source_handle_id=dataset.id,
         connector_type="eolymp",
         connector_version="eolymp-v1",
         owner_consent=True,
         source_reachable=True,
-        objects_discovered=1,
+        objects_discovered=objects_discovered,
         size_class=size_class,
         supported_capabilities=(
             "complete_traversal",
@@ -188,6 +220,13 @@ def _probe(dataset: DatasetRecord, preview_requested: bool) -> QuoteProbeRequest
         estimated_max_input_tokens=estimated_tokens,
         preview_requested=preview_requested,
     )
+    view = QuoteProbeView(
+        source_reachable=probe.source_reachable,
+        objects_discovered=probe.objects_discovered,
+        fixed_reason_skips={},
+        size_class=probe.size_class,
+    )
+    return probe, view
 
 
 async def prepare_quote(
@@ -213,16 +252,17 @@ async def prepare_quote(
     if latest and latest.state not in TERMINAL_STATES | {"QUOTED"}:
         raise DataVerificationLocalError("the current verification run must finish before another can start")
 
-    quote = await client.quote(_probe(dataset, request.preview_requested))
-    now = datetime.now(timezone.utc)
+    probe, probe_view = _probe(dataset, request.preview_requested)
+    quote = await client.quote(probe)
     if latest and latest.state == "QUOTED":
         latest = _save_run(
             latest.id,
-            accepted_at_utc=now,
+            accepted_at_utc=None,
             preview_requested=request.preview_requested,
-            publication_terms_ack=True,
-            corpus_ack=True,
+            publication_terms_ack=False,
+            corpus_ack=False,
             d6_json=d6_json,
+            probe_json=_dumps(probe_view.model_dump(mode="json")),
             quote_json=_dumps(quote.model_dump(mode="json")),
         )
         return _view(dataset, latest)
@@ -233,11 +273,12 @@ async def prepare_quote(
         state="QUOTED",
         idempotency_key=f"idem_{uuid4().hex}",
         owner_authorization_id=f"auth_{uuid4().hex}",
-        accepted_at_utc=now,
+        accepted_at_utc=None,
         preview_requested=request.preview_requested,
-        publication_terms_ack=request.publication_terms_ack,
-        corpus_ack=request.corpus_ack,
+        publication_terms_ack=False,
+        corpus_ack=False,
         d6_json=d6_json,
+        probe_json=_dumps(probe_view.model_dump(mode="json")),
         quote_json=_dumps(quote.model_dump(mode="json")),
     )
     with get_session_context() as session:
@@ -259,6 +300,31 @@ def _save_run(run_id: str, **changes: Any) -> DataVerificationRun:
         session.commit()
         session.refresh(run)
         return run
+
+
+def _claim(run_id: str, field: str) -> bool:
+    if field not in {"start_claimed", "scan_claimed"}:
+        raise ValueError("unsupported verification claim")
+    column = getattr(DataVerificationRun, field)
+    with get_session_context() as session:
+        result = session.exec(
+            update(DataVerificationRun)
+            .where(DataVerificationRun.id == run_id, column.is_(False))
+            .values({field: True, "updated_at": datetime.now(timezone.utc)})
+        )
+        session.commit()
+        return result.rowcount == 1
+
+
+async def _wait_for_run(
+    dataset_id: str, predicate: Any, *, message: str
+) -> DataVerificationRun:
+    for _ in range(500):
+        run = _latest_run(dataset_id)
+        if run and predicate(run):
+            return run
+        await asyncio.sleep(0.01)
+    raise DataVerificationLocalError(message)
 
 
 async def _sync_status(run: DataVerificationRun, client: DataVerificationClient) -> DataVerificationRun:
@@ -316,6 +382,7 @@ def _terminal_report(
 async def start(
     dataset_id: str,
     *,
+    request: StartVerificationRequest,
     client: DataVerificationClient,
     scanner: DataVerificationScanner,
     install_id: str,
@@ -328,13 +395,29 @@ async def start(
     run = _latest_run(dataset_id)
     if dataset is None or run is None or not run.quote_json:
         raise DataVerificationLocalError("a current verification quote is required")
-    if run.verification_id:
+    if not run.publication_terms_ack or not run.corpus_ack:
+        run = _save_run(
+            run.id,
+            accepted_at_utc=datetime.now(timezone.utc),
+            publication_terms_ack=request.publication_terms_ack,
+            corpus_ack=request.corpus_ack,
+        )
+
+    if run.report_ingest_json:
+        return _view(dataset, run)
+    if run.report_json:
+        report = _loads(run.report_json)
+        ingest = await client.ingest_report(report)
+        run = _save_run(
+            run.id, report_ingest_json=_dumps(ingest.model_dump(mode="json"))
+        )
         run = await _sync_status(run, client)
-        if run.report_ingest_json or run.state not in {"AUTHORIZED", "SCANNING_LOCAL"}:
-            return _view(dataset, run)
+        return _view(dataset, run)
 
     quote = QuoteResponse.model_validate_json(run.quote_json)
     accepted_at = run.accepted_at_utc
+    if accepted_at is None:
+        raise DataVerificationLocalError("the quote acknowledgements were not accepted")
     if accepted_at.tzinfo is None:
         accepted_at = accepted_at.replace(tzinfo=timezone.utc)
     issue = ScanSpecIssueRequest(
@@ -353,11 +436,51 @@ async def start(
         payment_disclosure_version="payment-disclosure-v1",
         authorization_usd=quote.hard_maximum.authorization_usd,
     )
-    spec = await client.start(issue)
-    spec_dict = spec.model_dump(mode="json")
-    run = _save_run(run.id, verification_id=spec.payload.verification_id)
+    spec_dict: dict[str, Any] | None = None
+    if not run.verification_id:
+        if _claim(run.id, "start_claimed"):
+            spec = await client.start(issue)
+            spec_dict = spec.model_dump(mode="json")
+            run = _save_run(run.id, verification_id=spec.payload.verification_id)
+        else:
+            run = await _wait_for_run(
+                dataset_id,
+                lambda candidate: bool(candidate.verification_id),
+                message="the server start claim did not complete",
+            )
+    if spec_dict is None:
+        run = await _wait_for_run(
+            dataset_id,
+            lambda candidate: bool(candidate.report_json or candidate.report_ingest_json),
+            message="the claimed verification start did not complete",
+        )
+        if run.report_ingest_json:
+            return _view(dataset, run)
+        report = _loads(run.report_json)
+        ingest = await client.ingest_report(report)
+        run = _save_run(
+            run.id, report_ingest_json=_dumps(ingest.model_dump(mode="json"))
+        )
+        run = await _sync_status(run, client)
+        return _view(dataset, run)
     run = await _sync_status(run, client)
     if run.state != "AUTHORIZED":
+        return _view(dataset, run)
+
+    if not _claim(run.id, "scan_claimed"):
+        run = await _wait_for_run(
+            dataset_id,
+            lambda candidate: bool(candidate.report_json or candidate.report_ingest_json),
+            message="the local scan claim did not complete",
+        )
+        if run.report_ingest_json:
+            return _view(dataset, run)
+        report = _loads(run.report_json)
+        ingest = await client.ingest_report(report)
+        run = _save_run(
+            run.id, report_ingest_json=_dumps(ingest.model_dump(mode="json"))
+        )
+        run = await _sync_status(run, client)
         return _view(dataset, run)
 
     try:
@@ -413,10 +536,20 @@ async def lifecycle_command(
         source_handle_id=run.source_handle_id,
         requested_action=action,
     )
-    updated = await client.command(command)
+    result = await client.command(command)
+    updated = result.status
+    changes: dict[str, Any] = {
+        "state": updated.state,
+        "payment_status_json": _dumps(updated.model_dump(mode="json")),
+    }
+    if action == "withdraw":
+        if result.server_date_utc is None:
+            raise DataVerificationLocalError(
+                "ai.market did not return the authoritative withdrawal date"
+            )
+        changes["withdrawn_at_utc"] = result.server_date_utc
     run = _save_run(
         run.id,
-        state=updated.state,
-        payment_status_json=_dumps(updated.model_dump(mode="json")),
+        **changes,
     )
     return _view(dataset, run)

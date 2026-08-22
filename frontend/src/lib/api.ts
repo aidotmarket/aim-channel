@@ -317,6 +317,13 @@ export interface DataVerificationQuote {
   partial_traversal_allowed: false;
 }
 
+export interface DataVerificationQuoteProbe {
+  source_reachable: boolean;
+  objects_discovered: number;
+  fixed_reason_skips: Partial<Record<'permission_denied' | 'unsupported_type' | 'timeout', number>>;
+  size_class: 'small' | 'medium' | 'large';
+}
+
 export interface DataVerificationPaymentStatus {
   verification_id: string;
   state: DataVerificationPaymentState;
@@ -336,12 +343,25 @@ export interface DataVerificationView {
   state: DataVerificationPaymentState | null;
   d6_description: DataVerificationD6 | null;
   preview_requested: boolean;
+  quote_probe: DataVerificationQuoteProbe | null;
   quote: DataVerificationQuote | null;
   payment_status: DataVerificationPaymentStatus | null;
   report_ingest: { verification_id: string; accepted: true; terminal_error_code: string | null; narrative_state: 'grounded' | 'withheld_grounding_failed' | null } | null;
   findings: Record<string, unknown> | null;
   d8_preview: Array<Record<string, unknown>> | null;
-  active_publication: { verification_id: string; scan_date: string; coverage: Record<string, unknown>; narrative_state: string | null } | null;
+  active_publication: {
+    publication_state: 'PUBLISHED';
+    verification_id: string;
+    scan_date: string;
+    report: Record<string, unknown>;
+    report_ingest: DataVerificationView['report_ingest'];
+    d8_preview: Array<Record<string, unknown>> | null;
+    captured_usd: string | null;
+  } | {
+    publication_state: 'WITHDRAWN';
+    verification_id: string;
+    withdrawn_at_utc: string;
+  } | null;
 }
 
 export const dataVerificationApi = {
@@ -349,13 +369,15 @@ export const dataVerificationApi = {
   quote: (datasetId: string, body: {
     d6_description: DataVerificationD6;
     preview_requested: boolean;
-    publication_terms_ack: true;
-    corpus_ack: true;
   }) => apiFetch<DataVerificationView>(`/api/data-verification/${datasetId}/quote`, {
     method: 'POST', body: JSON.stringify(body),
   }),
   start: (datasetId: string) => apiFetch<DataVerificationView>(`/api/data-verification/${datasetId}/start`, {
-    method: 'POST', body: JSON.stringify({ accept_quote: true }),
+    method: 'POST', body: JSON.stringify({
+      accept_quote: true,
+      publication_terms_ack: true,
+      corpus_ack: true,
+    }),
   }),
   command: (datasetId: string, action: 'cancel' | 'publish' | 'decline' | 'withdraw') =>
     apiFetch<DataVerificationView>(`/api/data-verification/${datasetId}/${action}`, {

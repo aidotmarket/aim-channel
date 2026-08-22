@@ -126,7 +126,12 @@ def _http_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=409, detail=str(exc))
 
 
-@router.get("/{dataset_id}", response_model=DataVerificationView)
+@router.get(
+    "/{dataset_id}",
+    response_model=DataVerificationView,
+    response_model_exclude_none=True,
+    response_model_exclude_defaults=True,
+)
 async def verification_view(
     dataset_id: str,
     request: Request,
@@ -142,7 +147,12 @@ async def verification_view(
         raise _http_error(exc) from exc
 
 
-@router.post("/{dataset_id}/quote", response_model=DataVerificationView)
+@router.post(
+    "/{dataset_id}/quote",
+    response_model=DataVerificationView,
+    response_model_exclude_none=True,
+    response_model_exclude_defaults=True,
+)
 async def quote_verification(
     dataset_id: str,
     body: PrepareVerificationRequest,
@@ -150,23 +160,33 @@ async def quote_verification(
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> DataVerificationView:
     try:
+        if not data_verification_enabled():
+            return get_view(dataset_id)
         runtime = await build_runtime(request, user)
         return await prepare_quote(dataset_id, body, client=runtime.client)
     except (DataVerificationLocalError, DataVerificationClientError) as exc:
         raise _http_error(exc) from exc
 
 
-@router.post("/{dataset_id}/start", response_model=DataVerificationView)
+@router.post(
+    "/{dataset_id}/start",
+    response_model=DataVerificationView,
+    response_model_exclude_none=True,
+    response_model_exclude_defaults=True,
+)
 async def start_verification(
     dataset_id: str,
-    _body: StartVerificationRequest,
+    body: StartVerificationRequest,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> DataVerificationView:
     try:
+        if not data_verification_enabled():
+            return get_view(dataset_id)
         runtime = await build_runtime(request, user)
         return await start(
             dataset_id,
+            request=body,
             client=runtime.client,
             scanner=runtime.scanner,
             install_id=runtime.install_id,
@@ -176,7 +196,12 @@ async def start_verification(
         raise _http_error(exc) from exc
 
 
-@router.post("/{dataset_id}/{action}", response_model=DataVerificationView)
+@router.post(
+    "/{dataset_id}/{action}",
+    response_model=DataVerificationView,
+    response_model_exclude_none=True,
+    response_model_exclude_defaults=True,
+)
 async def run_lifecycle_command(
     dataset_id: str,
     action: Literal["cancel", "publish", "decline", "withdraw"],
@@ -185,6 +210,8 @@ async def run_lifecycle_command(
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> DataVerificationView:
     try:
+        if not data_verification_enabled():
+            return get_view(dataset_id)
         runtime = await build_runtime(request, user)
         return await lifecycle_command(dataset_id, action, client=runtime.client)
     except (DataVerificationLocalError, DataVerificationClientError) as exc:

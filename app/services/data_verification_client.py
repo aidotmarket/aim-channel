@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -24,6 +27,12 @@ from app.services.marketplace_action_signer import (
 
 class DataVerificationClientError(RuntimeError):
     """A display-safe control-plane failure with no reflected response body."""
+
+
+@dataclass(frozen=True)
+class LifecycleCommandResult:
+    status: PaymentLifecycleStatus
+    server_date_utc: datetime | None
 
 
 class DataVerificationClient:
@@ -117,7 +126,8 @@ class DataVerificationClient:
             headers={"Authorization": f"Bearer {self._seller_access_token}"},
         )
         return PaymentLifecycleStatus.model_validate(response.json())
-    async def command(self, command: LifecycleCommand) -> PaymentLifecycleStatus:
+
+    async def command(self, command: LifecycleCommand) -> LifecycleCommandResult:
         action = command.requested_action
         response = await self._signed_json(
             "POST",
@@ -125,4 +135,16 @@ class DataVerificationClient:
             expected_action=f"data_verification_{action}",
             body=command.model_dump(mode="json"),
         )
-        return PaymentLifecycleStatus.model_validate(response.json())
+        server_date = response.headers.get("Date")
+        observed_at = None
+        if server_date:
+            try:
+                observed_at = parsedate_to_datetime(server_date).astimezone(timezone.utc)
+            except (TypeError, ValueError) as exc:
+                raise DataVerificationClientError(
+                    "ai.market data verification returned an invalid server date"
+                ) from exc
+        return LifecycleCommandResult(
+            status=PaymentLifecycleStatus.model_validate(response.json()),
+            server_date_utc=observed_at,
+        )

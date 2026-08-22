@@ -79,6 +79,11 @@ def _objects(artifact_name: str, payload: bytes) -> list[tuple[str, bytes]]:
     return [("registered-root", payload)]
 
 
+def probe_object_count(artifact_name: str, payload: bytes) -> int:
+    """Use the scan traversal itself to count a local artifact's objects."""
+    return len(_objects(artifact_name, payload))
+
+
 def _type_name(data_type: pa.DataType) -> str:
     if pa.types.is_boolean(data_type):
         return "boolean"

@@ -12,7 +12,7 @@ import json
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator, model_validator
 
 
-OpaqueId = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$")]
+OpaqueId = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")]
 
 
 class StrictModel(BaseModel):
@@ -85,6 +85,15 @@ class QuoteProbeRequest(StrictModel):
         if value != required:
             raise ValueError("probe capabilities are incomplete or non-canonical")
         return value
+
+
+class QuoteProbeView(StrictModel):
+    source_reachable: StrictBool
+    objects_discovered: StrictInt = Field(ge=1)
+    fixed_reason_skips: dict[
+        Literal["permission_denied", "unsupported_type", "timeout"], StrictInt
+    ]
+    size_class: Literal["small", "medium", "large"]
 
 
 class QuoteHardMaximum(StrictModel):
@@ -166,12 +175,12 @@ class LifecycleCommand(StrictModel):
 class PrepareVerificationRequest(StrictModel):
     d6_description: D6Description
     preview_requested: StrictBool
-    publication_terms_ack: Literal[True]
-    corpus_ack: Literal[True]
 
 
 class StartVerificationRequest(StrictModel):
     accept_quote: Literal[True]
+    publication_terms_ack: Literal[True]
+    corpus_ack: Literal[True]
 
 
 class ConfirmLifecycleRequest(StrictModel):
@@ -187,6 +196,7 @@ class DataVerificationView(StrictModel):
     state: str | None = None
     d6_description: D6Description | None = None
     preview_requested: bool = False
+    quote_probe: QuoteProbeView | None = None
     quote: QuoteResponse | None = None
     payment_status: PaymentLifecycleStatus | None = None
     report_ingest: ReportIngestResponse | None = None

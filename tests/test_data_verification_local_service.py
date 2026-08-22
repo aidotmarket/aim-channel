@@ -386,9 +386,9 @@ async def test_concurrent_starts_share_one_epoch_and_one_scanner_execution(tmp_p
 async def test_live_start_lease_heartbeats_past_initial_expiry_without_duplicate_ingest(
     tmp_path, monkeypatch
 ):
-    ingest_delay_seconds = 0.06
-    monkeypatch.setattr(local_service, "START_LEASE_SECONDS", 0.02)
-    monkeypatch.setattr(local_service, "START_LEASE_HEARTBEAT_SECONDS", 0.005)
+    ingest_delay_seconds = 1.0
+    monkeypatch.setattr(local_service, "START_LEASE_SECONDS", 0.5)
+    monkeypatch.setattr(local_service, "START_LEASE_HEARTBEAT_SECONDS", 0.05)
     monkeypatch.setattr(local_service, "START_LEASE_POLL_SECONDS", 0.001)
     assert ingest_delay_seconds > local_service.START_LEASE_SECONDS
 
@@ -402,17 +402,28 @@ async def test_live_start_lease_heartbeats_past_initial_expiry_without_duplicate
     scanner = FakeScanner(dataset_id)
     await prepare_quote(dataset_id, prepare_body(), client=client)
 
-    first, second = await asyncio.gather(*(
-        start(
-            dataset_id,
-            request=start_body(),
-            client=client,
-            scanner=scanner,
-            install_id="install_fixture",
-            install_private_key=object(),
-        )
-        for _ in range(2)
-    ))
+    results = await asyncio.gather(
+        *(
+            start(
+                dataset_id,
+                request=start_body(),
+                client=client,
+                scanner=scanner,
+                install_id="install_fixture",
+                install_private_key=object(),
+            )
+            for _ in range(2)
+        ),
+        return_exceptions=True,
+    )
+
+    assert not any(
+        isinstance(result, DataVerificationLocalError)
+        and str(result) == "verification start lease was lost"
+        for result in results
+    ), results
+    assert not any(isinstance(result, BaseException) for result in results), results
+    first, second = results
 
     with get_session_context() as session:
         runs = session.exec(
@@ -730,7 +741,7 @@ def _accepted_recovery_run(
         run.scan_claimed = scan_claimed
         run.start_lease_owner_id = "dead-owner"
         run.start_lease_expires_at_utc = datetime(
-            2026, 8, 22, 11, 59, tzinfo=timezone.utc
+            2000, 1, 1, tzinfo=timezone.utc
         )
         session.add(run)
         session.commit()
@@ -863,7 +874,7 @@ async def test_restart_after_each_claim_compare_and_set_completes_once(
         ).one()
         run.start_lease_owner_id = "dead-owner"
         run.start_lease_expires_at_utc = datetime(
-            2026, 8, 22, 11, 59, tzinfo=timezone.utc
+            2000, 1, 1, tzinfo=timezone.utc
         )
         session.add(run)
         session.commit()

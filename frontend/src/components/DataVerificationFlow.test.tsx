@@ -97,6 +97,13 @@ describe("DataVerificationFlow", () => {
     expect(screen.getByText(dataVerificationV1.copy.d6Note)).toBeInTheDocument();
     expect(screen.queryByText("education_learning")).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    for (const definition of Object.values(dataVerificationV1.vocabulary)) {
+      expect(screen.getByText(definition.help)).toBeInTheDocument();
+      for (const [slug, label] of definition.options) {
+        expect(screen.getByText(label)).toBeInTheDocument();
+        expect(screen.queryByText(slug)).not.toBeInTheDocument();
+      }
+    }
     fireEvent.change(screen.getByRole("combobox", { name: /Data domain/ }), { target: { value: "education_learning" } });
     fireEvent.change(screen.getByRole("combobox", { name: /One record represents/ }), { target: { value: "entity" } });
     fireEvent.change(screen.getByRole("combobox", { name: /Time coverage/ }), { target: { value: "current_snapshot" } });
@@ -106,6 +113,9 @@ describe("DataVerificationFlow", () => {
 
     const publication = screen.getByLabelText(dataVerificationV1.copy.publicationAcknowledgement);
     const corpus = screen.getByLabelText(dataVerificationV1.copy.corpusAcknowledgement);
+    for (const copy of ["rawBoundary", "cancelBoundary", "hiddenUntilCapture", "noRefund", "ourFault"] as const) {
+      expect(screen.getByText(dataVerificationV1.copy[copy], { exact: false })).toBeInTheDocument();
+    }
     expect(publication).not.toBeChecked();
     expect(corpus).not.toBeChecked();
     expect(dataVerificationV1.copy.publicationAcknowledgement).toContain("separate choice");
@@ -134,8 +144,11 @@ describe("DataVerificationFlow", () => {
     expect(screen.getByText("Decline publication")).toBeInTheDocument();
     expect(screen.getByText("Final charged amount: $1.23")).toBeInTheDocument();
     expect(screen.queryByText(/quality score/i)).not.toBeInTheDocument();
+    expect(screen.getByText(dataVerificationV1.copy.attestation.replace("[scan date and time]", "2026-08-22"))).toBeInTheDocument();
+    expect(screen.getByText(dataVerificationV1.copy.disclaimer.replace("[scan date]", "2026-08-22"))).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Publish all findings" }));
     await waitFor(() => expect(dataVerificationApi.command).toHaveBeenCalledWith("ds-1", "publish"));
+    expect(window.confirm).toHaveBeenCalledWith(dataVerificationV1.copy.publishConfirmation);
   });
 
   it("keeps the active badge during rerun and resets both acknowledgements", async () => {

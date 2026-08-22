@@ -56,8 +56,13 @@ async def test_lifecycle_client_contract_paths_claims_and_canonical_payloads():
                 "accepted": True,
                 "terminal_error_code": None,
                 "narrative_state": "grounded",
+                "narrative": "Grounded allAI narrative fixture.",
+                "listing_claim_comparison": "Listing claims match the deterministic scan fixture.",
             })
-        return httpx.Response(200, headers={"Date": "Sat, 22 Aug 2026 18:30:00 GMT"}, json={
+        response_headers = {
+            "Date": "invalid-date" if route_name == "withdraw" else "Sat, 22 Aug 2026 18:30:00 GMT"
+        }
+        return httpx.Response(200, headers=response_headers, json={
             "verification_id": VERIFICATION_ID,
             "state": "CAPTURED",
             "authorization_usd": "25.00",
@@ -104,10 +109,11 @@ async def test_lifecycle_client_contract_paths_claims_and_canonical_payloads():
             corpus_disclosure_version="s1396-disclosure-v1",
             payment_disclosure_version="payment-disclosure-v1",
         ))
-        await client.ingest_report(json.loads((FIXTURES / "report.json").read_text()))
+        ingest = await client.ingest_report(json.loads((FIXTURES / "report.json").read_text()))
         await client.status(VERIFICATION_ID)
+        command_results = {}
         for action in ("cancel", "publish", "decline", "withdraw"):
-            await client.command(LifecycleCommand(
+            command_results[action] = await client.command(LifecycleCommand(
                 verification_id=VERIFICATION_ID,
                 listing_id=LISTING_ID,
                 source_handle_id="dataset_fixture",
@@ -115,6 +121,16 @@ async def test_lifecycle_client_contract_paths_claims_and_canonical_payloads():
             ))
 
     expected = contract["routes"]
+    requirements = contract["chunk_6_response_requirements"]
+    assert ingest.narrative == "Grounded allAI narrative fixture."
+    assert ingest.listing_claim_comparison == "Listing claims match the deterministic scan fixture."
+    assert command_results["withdraw"].server_date_utc is None
+    assert requirements["grounded_result_projection"]["must_carry_display_safe_fields"] == [
+        "narrative",
+        "listing_claim_comparison",
+    ]
+    assert requirements["PaymentLifecycleStatus"]["must_carry_field"] == "withdrawn_at_utc"
+    assert requirements["carried_item"]["id"] == "s3_pinned_archive_member_enumeration"
     assert seen == [
         (expected["quote"]["method"], expected["quote"]["path_template"], expected["quote"]["expected_action"]),
         (expected["start"]["method"], expected["start"]["path_template"], expected["start"]["expected_action"]),

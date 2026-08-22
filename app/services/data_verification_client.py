@@ -140,10 +140,8 @@ class DataVerificationClient:
         if server_date:
             try:
                 observed_at = parsedate_to_datetime(server_date).astimezone(timezone.utc)
-            except (TypeError, ValueError) as exc:
-                raise DataVerificationClientError(
-                    "ai.market data verification returned an invalid server date"
-                ) from exc
+            except (TypeError, ValueError):
+                observed_at = None
         return LifecycleCommandResult(
             status=PaymentLifecycleStatus.model_validate(response.json()),
             server_date_utc=observed_at,

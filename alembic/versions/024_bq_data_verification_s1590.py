@@ -40,6 +40,7 @@ def upgrade() -> None:
         sa.Column("d8_json", sa.Text(), nullable=True),
         sa.Column("start_claimed", sa.Boolean(), nullable=False),
         sa.Column("scan_claimed", sa.Boolean(), nullable=False),
+        sa.Column("withdraw_requested_at_utc", sa.DateTime(), nullable=True),
         sa.Column("withdrawn_at_utc", sa.DateTime(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),

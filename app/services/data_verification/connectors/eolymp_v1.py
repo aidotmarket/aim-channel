@@ -80,8 +80,22 @@ def _objects(artifact_name: str, payload: bytes) -> list[tuple[str, bytes]]:
 
 
 def probe_object_count(artifact_name: str, payload: bytes) -> int:
-    """Use the scan traversal itself to count a local artifact's objects."""
-    return len(_objects(artifact_name, payload))
+    """Count local objects from zip metadata without decompressing entry contents."""
+    stream = io.BytesIO(payload)
+    if zipfile.is_zipfile(stream):
+        try:
+            with zipfile.ZipFile(stream) as archive:
+                names = [name for name in archive.namelist() if not name.endswith("/")]
+                if not names or any(_suffix(name) not in SUPPORTED_SUFFIXES for name in names):
+                    raise IncompleteCoverageError("artifact traversal is not fully supported")
+                if len(set(names)) != len(names):
+                    raise IncompleteCoverageError("artifact traversal identities are ambiguous")
+                return len(names)
+        except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+            raise UnsupportedConnectorShape("archive could not be decoded") from exc
+    if _suffix(artifact_name) not in SUPPORTED_SUFFIXES:
+        raise UnsupportedConnectorShape("artifact type is unsupported")
+    return 1
 
 
 def _type_name(data_type: pa.DataType) -> str:

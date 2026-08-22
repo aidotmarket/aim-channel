@@ -15,6 +15,8 @@ const d6 = {
   intended_use_tags: ["analysis_reporting"],
   known_limitation_tags: [],
 };
+const groundedNarrative = "The dataset contains twelve programming-problem records with deterministic aggregate coverage.";
+const listingClaimComparison = "The listing claim of complete problem coverage matches the scanned source.";
 
 const baseView: DataVerificationView = {
   dataset_id: "ds-1",
@@ -70,7 +72,14 @@ const capturedView: DataVerificationView = {
     publication_allowed: true,
     reconciliation_required: false,
   },
-  report_ingest: { verification_id: "22222222-2222-4222-8222-222222222222", accepted: true, terminal_error_code: null, narrative_state: "grounded" },
+  report_ingest: {
+    verification_id: "22222222-2222-4222-8222-222222222222",
+    accepted: true,
+    terminal_error_code: null,
+    narrative_state: "grounded",
+    narrative: groundedNarrative,
+    listing_claim_comparison: listingClaimComparison,
+  },
   findings: {
     completed_at_utc: "2026-08-22T12:00:00Z",
     coverage: { objects_discovered: 1, objects_scanned: 1, objects_skipped_by_reason: {}, skipped: [] },
@@ -162,6 +171,10 @@ describe("DataVerificationFlow", () => {
     expect(await screen.findByLabelText("Captured scan review")).toBeInTheDocument();
     expect(screen.getByText("Publish all findings")).toBeInTheDocument();
     expect(screen.getByText("Decline publication")).toBeInTheDocument();
+    expect(screen.getByText(groundedNarrative)).toBeInTheDocument();
+    expect(screen.getByText(listingClaimComparison)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Publish all findings" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Decline publication" })).toBeEnabled();
     expect(screen.getByText("Final charged amount: $1.23")).toBeInTheDocument();
     expect(screen.queryByText(/quality score/i)).not.toBeInTheDocument();
     expect(screen.getByText(dataVerificationV1.copy.attestation.replace("[scan date and time]", "2026-08-22T12:00:00.000Z"))).toBeInTheDocument();
@@ -237,8 +250,47 @@ describe("DataVerificationFlow", () => {
     expect(within(review).getByText("Objects discovered: 1")).toBeInTheDocument();
     expect(within(review).getByText("Objects scanned: 1")).toBeInTheDocument();
     expect(within(review).getAllByText("None returned.")).toHaveLength(2);
-    expect(within(review).getByText(/Server returned narrative_state: grounded/)).toBeInTheDocument();
+    expect(within(review).getByText(groundedNarrative)).toBeInTheDocument();
+    expect(within(review).getByText(listingClaimComparison)).toBeInTheDocument();
     expect(within(review).queryByText("Grounded interpretation completed.")).not.toBeInTheDocument();
+  });
+
+  it("blocks publish when grounded interpretation text is unavailable and leaves decline enabled", async () => {
+    vi.mocked(dataVerificationApi.get).mockResolvedValue({
+      ...capturedView,
+      report_ingest: {
+        verification_id: "22222222-2222-4222-8222-222222222222",
+        accepted: true,
+        terminal_error_code: null,
+        narrative_state: "grounded",
+      },
+    });
+    render(<DataVerificationFlow datasetId="ds-1" sourceName="problems.csv" listingId={baseView.listing_id} />);
+
+    expect(await screen.findByText("The grounded allAI interpretation text is not yet available from the server.")).toBeInTheDocument();
+    expect(screen.getByText("The listing-claim comparison is not yet available from the server.")).toBeInTheDocument();
+    expect(screen.getByText(/full allAI interpretation text must be reviewed before publication/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Publish all findings" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Decline publication" })).toBeEnabled();
+  });
+
+  it("renders only the fixed fingerprint notice when grounding is withheld", async () => {
+    vi.mocked(dataVerificationApi.get).mockResolvedValue({
+      ...capturedView,
+      report_ingest: {
+        verification_id: "22222222-2222-4222-8222-222222222222",
+        accepted: true,
+        terminal_error_code: null,
+        narrative_state: "withheld_grounding_failed",
+      },
+    });
+    render(<DataVerificationFlow datasetId="ds-1" sourceName="problems.csv" listingId={baseView.listing_id} />);
+
+    expect(await screen.findByText("allAI interpretation withheld because grounding validation failed")).toBeInTheDocument();
+    expect(screen.queryByText(groundedNarrative)).not.toBeInTheDocument();
+    expect(screen.queryByText(listingClaimComparison)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Publish all findings" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Decline publication" })).toBeEnabled();
   });
 
   it("renders no artifact facts while capture is reconciling", async () => {
@@ -300,6 +352,6 @@ describe("DataVerificationFlow", () => {
     });
     render(<DataVerificationFlow datasetId="ds-1" sourceName="problems.csv" listingId={baseView.listing_id} />);
 
-    expect(await screen.findByText("Scan findings withdrawn by seller on 2026-08-22")).toBeInTheDocument();
+    expect(await screen.findByText("Scan findings withdrawn by seller on 2026-08-22; buyers see this notice for 30 days.")).toBeInTheDocument();
   });
 });

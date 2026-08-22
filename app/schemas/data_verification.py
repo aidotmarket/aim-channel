@@ -152,6 +152,14 @@ class PaymentLifecycleStatus(StrictModel):
     result_available: StrictBool
     publication_allowed: StrictBool
     reconciliation_required: StrictBool
+    withdrawn_at_utc: datetime | None = None
+
+    @field_validator("withdrawn_at_utc")
+    @classmethod
+    def _withdrawal_timezone_required(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("withdrawn_at_utc must include a timezone")
+        return value
 
 
 TerminalErrorCode = Literal["permission_denied", "unsupported_type", "timeout", "source_unreachable", "artifact_changed", "scanner_failure"]
@@ -163,6 +171,8 @@ class ReportIngestResponse(StrictModel):
     accepted: Literal[True]
     terminal_error_code: TerminalErrorCode | None = None
     narrative_state: NarrativeState | None = None
+    narrative: str | None = None
+    listing_claim_comparison: str | None = None
 
 
 class LifecycleCommand(StrictModel):

@@ -46,6 +46,7 @@ CANCEL_STATES = {
     "AUTHORIZING", "AUTHORIZED", "SCANNING_LOCAL", "NARRATING_CLOUD",
     "CAPTURE_PENDING", "CAPTURE_RECONCILING",
 }
+CLAIM_WAIT_ATTEMPTS = 500
 
 
 class DataVerificationLocalError(RuntimeError):
@@ -81,6 +82,10 @@ def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _active_publication(dataset_id: str) -> dict[str, Any] | None:
     with get_session_context() as session:
         runs = session.exec(
@@ -90,7 +95,7 @@ def _active_publication(dataset_id: str) -> dict[str, Any] | None:
         ).all()
     for run in runs:
         if run.state == "WITHDRAWN":
-            if run.withdrawn_at_utc and datetime.now(timezone.utc) - _utc(run.withdrawn_at_utc) <= timedelta(days=30):
+            if run.withdrawn_at_utc and _now_utc() - _utc(run.withdrawn_at_utc) <= timedelta(days=30):
                 return {
                     "publication_state": "WITHDRAWN",
                     "verification_id": run.verification_id,
@@ -318,7 +323,7 @@ def _claim(run_id: str, field: str) -> bool:
 async def _wait_for_run(
     dataset_id: str, predicate: Any, *, message: str
 ) -> DataVerificationRun:
-    for _ in range(500):
+    for _ in range(CLAIM_WAIT_ATTEMPTS):
         run = _latest_run(dataset_id)
         if run and predicate(run):
             return run
@@ -330,11 +335,32 @@ async def _sync_status(run: DataVerificationRun, client: DataVerificationClient)
     if not run.verification_id:
         return run
     status = await client.status(run.verification_id)
-    return _save_run(
-        run.id,
-        state=status.state,
-        payment_status_json=_dumps(status.model_dump(mode="json")),
+    changes: dict[str, Any] = {
+        "state": status.state,
+        "payment_status_json": _dumps(status.model_dump(mode="json")),
+    }
+    if status.state == "WITHDRAWN":
+        withdrawn_at = (
+            status.withdrawn_at_utc
+            or run.withdrawn_at_utc
+            or run.withdraw_requested_at_utc
+        )
+        if withdrawn_at is not None:
+            changes["withdrawn_at_utc"] = withdrawn_at
+    return _save_run(run.id, **changes)
+
+
+async def _ingest_persisted_report(
+    run: DataVerificationRun, client: DataVerificationClient
+) -> DataVerificationRun:
+    report = _loads(run.report_json)
+    if report is None:
+        raise DataVerificationLocalError("the persisted verification report is unavailable")
+    ingest = await client.ingest_report(report)
+    run = _save_run(
+        run.id, report_ingest_json=_dumps(ingest.model_dump(mode="json"))
     )
+    return await _sync_status(run, client)
 
 
 async def refresh(dataset_id: str, *, client: DataVerificationClient) -> DataVerificationView:
@@ -405,12 +431,7 @@ async def start(
     if run.report_ingest_json:
         return _view(dataset, run)
     if run.report_json:
-        report = _loads(run.report_json)
-        ingest = await client.ingest_report(report)
-        run = _save_run(
-            run.id, report_ingest_json=_dumps(ingest.model_dump(mode="json"))
-        )
-        run = await _sync_status(run, client)
+        run = await _ingest_persisted_report(run, client)
         return _view(dataset, run)
 
     quote = QuoteResponse.model_validate_json(run.quote_json)
@@ -436,51 +457,77 @@ async def start(
         authorization_usd=quote.hard_maximum.authorization_usd,
     )
     spec_dict: dict[str, Any] | None = None
+    recover_scan_claim = False
     if not run.verification_id:
         if _claim(run.id, "start_claimed"):
             spec = await client.start(issue)
             spec_dict = spec.model_dump(mode="json")
             run = _save_run(run.id, verification_id=spec.payload.verification_id)
         else:
-            run = await _wait_for_run(
-                dataset_id,
-                lambda candidate: bool(candidate.verification_id),
-                message="the server start claim did not complete",
-            )
+            try:
+                run = await _wait_for_run(
+                    dataset_id,
+                    lambda candidate: bool(candidate.verification_id),
+                    message="the server start claim did not complete",
+                )
+            except DataVerificationLocalError:
+                spec = await client.start(issue)
+                spec_dict = spec.model_dump(mode="json")
+                run = _save_run(run.id, verification_id=spec.payload.verification_id)
     if spec_dict is None:
-        run = await _wait_for_run(
-            dataset_id,
-            lambda candidate: bool(candidate.report_json or candidate.report_ingest_json),
-            message="the claimed verification start did not complete",
-        )
+        completed: DataVerificationRun | None = None
+        try:
+            completed = await _wait_for_run(
+                dataset_id,
+                lambda candidate: bool(candidate.report_ingest_json),
+                message="the claimed verification start did not complete",
+            )
+        except DataVerificationLocalError:
+            pass
+        if completed is not None:
+            completed = await _sync_status(completed, client)
+            return _view(dataset, completed)
+        run = _latest_run(dataset_id)
+        if run is None:
+            raise DataVerificationLocalError("verification run was not found")
         if run.report_ingest_json:
             return _view(dataset, run)
-        report = _loads(run.report_json)
-        ingest = await client.ingest_report(report)
-        run = _save_run(
-            run.id, report_ingest_json=_dumps(ingest.model_dump(mode="json"))
-        )
-        run = await _sync_status(run, client)
-        return _view(dataset, run)
+        if run.report_json:
+            run = await _ingest_persisted_report(run, client)
+            return _view(dataset, run)
+        spec = await client.start(issue)
+        if run.verification_id and run.verification_id != spec.payload.verification_id:
+            raise DataVerificationLocalError(
+                "the idempotent server start returned a different verification identity"
+            )
+        spec_dict = spec.model_dump(mode="json")
+        recover_scan_claim = run.scan_claimed
+        run = _save_run(run.id, verification_id=spec.payload.verification_id)
     run = await _sync_status(run, client)
     if run.state != "AUTHORIZED":
         return _view(dataset, run)
 
-    if not _claim(run.id, "scan_claimed"):
-        run = await _wait_for_run(
-            dataset_id,
-            lambda candidate: bool(candidate.report_json or candidate.report_ingest_json),
-            message="the local scan claim did not complete",
-        )
+    if not _claim(run.id, "scan_claimed") and not recover_scan_claim:
+        completed = None
+        try:
+            completed = await _wait_for_run(
+                dataset_id,
+                lambda candidate: bool(candidate.report_ingest_json),
+                message="the local scan claim did not complete",
+            )
+        except DataVerificationLocalError:
+            pass
+        if completed is not None:
+            completed = await _sync_status(completed, client)
+            return _view(dataset, completed)
+        run = _latest_run(dataset_id)
+        if run is None:
+            raise DataVerificationLocalError("verification run was not found")
         if run.report_ingest_json:
             return _view(dataset, run)
-        report = _loads(run.report_json)
-        ingest = await client.ingest_report(report)
-        run = _save_run(
-            run.id, report_ingest_json=_dumps(ingest.model_dump(mode="json"))
-        )
-        run = await _sync_status(run, client)
-        return _view(dataset, run)
+        if run.report_json:
+            run = await _ingest_persisted_report(run, client)
+            return _view(dataset, run)
 
     try:
         execution = scanner.scan(
@@ -525,6 +572,27 @@ async def lifecycle_command(
         raise DataVerificationLocalError("cancel is not available in the current server state")
     if action == "publish" and (status.state != "CAPTURED" or not status.publication_allowed):
         raise DataVerificationLocalError("publication is not available in the current server state")
+    if action == "publish":
+        ingest = (
+            ReportIngestResponse.model_validate_json(run.report_ingest_json)
+            if run.report_ingest_json
+            else None
+        )
+        grounded_text_ready = bool(
+            ingest
+            and ingest.narrative_state == "grounded"
+            and ingest.narrative
+            and ingest.narrative.strip()
+            and ingest.listing_claim_comparison
+            and ingest.listing_claim_comparison.strip()
+        )
+        fingerprint_notice_ready = bool(
+            ingest and ingest.narrative_state == "withheld_grounding_failed"
+        )
+        if not (grounded_text_ready or fingerprint_notice_ready):
+            raise DataVerificationLocalError(
+                "the full allAI interpretation text is not available for publication review"
+            )
     if action == "decline" and status.state != "CAPTURED":
         raise DataVerificationLocalError("decline is not available in the current server state")
     if action == "withdraw" and status.state != "PUBLISHED":
@@ -535,6 +603,10 @@ async def lifecycle_command(
         source_handle_id=run.source_handle_id,
         requested_action=action,
     )
+    if action == "withdraw" and run.withdraw_requested_at_utc is None:
+        run = _save_run(
+            run.id, withdraw_requested_at_utc=_now_utc()
+        )
     result = await client.command(command)
     updated = result.status
     changes: dict[str, Any] = {
@@ -542,11 +614,13 @@ async def lifecycle_command(
         "payment_status_json": _dumps(updated.model_dump(mode="json")),
     }
     if action == "withdraw":
-        if result.server_date_utc is None:
-            raise DataVerificationLocalError(
-                "ai.market did not return the authoritative withdrawal date"
-            )
-        changes["withdrawn_at_utc"] = result.server_date_utc
+        withdrawn_at = (
+            updated.withdrawn_at_utc
+            or result.server_date_utc
+            or run.withdraw_requested_at_utc
+        )
+        if withdrawn_at is not None:
+            changes["withdrawn_at_utc"] = withdrawn_at
     run = _save_run(
         run.id,
         **changes,

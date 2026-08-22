@@ -20,6 +20,7 @@ from app.schemas.data_verification import (
     ReportIngestResponse,
     StartVerificationRequest,
 )
+from app.services import data_verification_local_service as local_service
 from app.services import source_artifact_resolver as resolver
 from app.services.data_verification.contract import SignedScanSpec
 from app.services.data_verification.scanner import ScanExecution
@@ -75,6 +76,7 @@ class FakeClient:
     def __init__(self, final_state: str = "CAPTURED"):
         self.final_state = final_state
         self.quote_calls = 0
+        self.start_requests = 0
         self.start_calls = 0
         self.ingest_calls = 0
         self.status_calls = 0
@@ -82,6 +84,7 @@ class FakeClient:
         self.verification_id = VERIFICATION_ID
         self.last_report = None
         self.last_probe = None
+        self._issued_specs = {}
 
     async def quote(self, probe):
         self.quote_calls += 1
@@ -101,8 +104,13 @@ class FakeClient:
         })
 
     async def start(self, request):
+        self.start_requests += 1
+        if request.idempotency_key in self._issued_specs:
+            return self._issued_specs[request.idempotency_key]
         self.start_calls += 1
-        self.verification_id = str(uuid5(NAMESPACE_URL, f"{request.source_handle_id}:{self.start_calls}"))
+        self.verification_id = str(
+            uuid5(NAMESPACE_URL, f"{request.source_handle_id}:{request.idempotency_key}")
+        )
         document = json.loads((FIXTURES / "scan_spec.json").read_text())
         issued_at = request.accepted_at_utc + timedelta(seconds=1)
         document["payload"].update(
@@ -116,7 +124,9 @@ class FakeClient:
             expires_at_utc=(issued_at + timedelta(minutes=10)).isoformat(),
             verification_id=self.verification_id,
         )
-        return SignedScanSpec.model_validate(document)
+        issued = SignedScanSpec.model_validate(document)
+        self._issued_specs[request.idempotency_key] = issued
+        return issued
 
     async def ingest_report(self, _report):
         self.ingest_calls += 1
@@ -125,11 +135,13 @@ class FakeClient:
             verification_id=self.verification_id,
             accepted=True,
             narrative_state="grounded",
+            narrative="Grounded allAI narrative fixture.",
+            listing_claim_comparison="Listing claims match the deterministic scan fixture.",
         )
 
     async def status(self, _verification_id):
         self.status_calls += 1
-        state = "AUTHORIZED" if self.status_calls == 1 else self.final_state
+        state = "AUTHORIZED" if self.ingest_calls == 0 else self.final_state
         return PaymentLifecycleStatus(
             verification_id=self.verification_id,
             state=state,
@@ -364,8 +376,10 @@ async def test_concurrent_starts_share_one_epoch_and_one_scanner_execution(tmp_p
     ))
 
     assert first.payment_status.verification_id == second.payment_status.verification_id
+    assert first.state == second.state == "CAPTURED"
     assert client.start_calls == 1
     assert scanner.calls == 1
+    assert client.ingest_calls == 1
 
 
 @pytest.mark.asyncio
@@ -380,6 +394,8 @@ async def test_retry_after_report_persistence_gap_ingests_without_rescanning(tmp
                 verification_id=self.verification_id,
                 accepted=True,
                 narrative_state="grounded",
+                narrative="Grounded allAI narrative fixture.",
+                listing_claim_comparison="Listing claims match the deterministic scan fixture.",
             )
 
     dataset_id = make_dataset(tmp_path, monkeypatch)
@@ -419,6 +435,13 @@ async def test_quote_precedes_stored_acceptance_and_zip_probe_is_honest(tmp_path
         archive.writestr("a.csv", "id\n1\n")
         archive.writestr("b.csv", "id\n2\n")
     (tmp_path / "uploads" / "source.zip").write_bytes(archive_bytes.getvalue())
+    monkeypatch.setattr(
+        zipfile.ZipFile,
+        "read",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("the free zip probe must not decompress entries")
+        ),
+    )
     client = FakeClient()
 
     quoted = await prepare_quote(dataset_id, prepare_body(), client=client)
@@ -455,3 +478,356 @@ async def test_published_to_withdrawn_persists_server_authoritative_marker_date(
         "verification_id": client.verification_id,
         "withdrawn_at_utc": "2026-08-22T18:30:00Z",
     }
+
+
+@pytest.mark.asyncio
+async def test_grounded_result_without_display_text_cannot_publish_but_can_decline(
+    tmp_path, monkeypatch
+):
+    class MissingNarrativeClient(FakeClient):
+        async def ingest_report(self, report):
+            self.ingest_calls += 1
+            self.last_report = report
+            return ReportIngestResponse(
+                verification_id=self.verification_id,
+                accepted=True,
+                narrative_state="grounded",
+            )
+
+    dataset_id = make_dataset(tmp_path, monkeypatch)
+    client = MissingNarrativeClient()
+    await prepare_quote(dataset_id, prepare_body(), client=client)
+    await start(
+        dataset_id,
+        request=start_body(),
+        client=client,
+        scanner=FakeScanner(dataset_id),
+        install_id="install_fixture",
+        install_private_key=object(),
+    )
+
+    with pytest.raises(DataVerificationLocalError, match="full allAI interpretation text"):
+        await lifecycle_command(dataset_id, "publish", client=client)
+    declined = await lifecycle_command(dataset_id, "decline", client=client)
+    assert declined.state == "DECLINED"
+
+
+@pytest.mark.asyncio
+async def test_withdraw_without_response_date_uses_precommand_request_time(
+    tmp_path, monkeypatch
+):
+    class MissingDateClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.persisted_request_at = None
+
+        async def command(self, command):
+            result = await super().command(command)
+            if command.requested_action == "withdraw":
+                with get_session_context() as session:
+                    run = session.exec(
+                        select(DataVerificationRun).where(
+                            DataVerificationRun.dataset_id == dataset_id
+                        )
+                    ).one()
+                    self.persisted_request_at = run.withdraw_requested_at_utc
+                return LifecycleCommandResult(status=result.status, server_date_utc=None)
+            return result
+
+    dataset_id = make_dataset(tmp_path, monkeypatch)
+    client = MissingDateClient()
+    await prepare_quote(dataset_id, prepare_body(), client=client)
+    await start(
+        dataset_id,
+        request=start_body(),
+        client=client,
+        scanner=FakeScanner(dataset_id),
+        install_id="install_fixture",
+        install_private_key=object(),
+    )
+    await lifecycle_command(dataset_id, "publish", client=client)
+    withdrawn = await lifecycle_command(dataset_id, "withdraw", client=client)
+
+    requested_at = client.persisted_request_at.replace(tzinfo=timezone.utc)
+    assert withdrawn.active_publication["withdrawn_at_utc"] == (
+        requested_at.isoformat().replace("+00:00", "Z")
+    )
+    monkeypatch.setattr(
+        local_service, "_now_utc", lambda: requested_at + timedelta(days=29)
+    )
+    assert get_view(dataset_id).active_publication["withdrawn_at_utc"] == (
+        requested_at.isoformat().replace("+00:00", "Z")
+    )
+
+
+@pytest.mark.asyncio
+async def test_lost_withdraw_response_refresh_recovers_original_request_time(
+    tmp_path, monkeypatch
+):
+    class LostResponseClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.withdraw_processed = False
+            self.persisted_request_at = None
+
+        async def command(self, command):
+            if command.requested_action != "withdraw":
+                return await super().command(command)
+            with get_session_context() as session:
+                run = session.exec(
+                    select(DataVerificationRun).where(
+                        DataVerificationRun.dataset_id == dataset_id
+                    )
+                ).one()
+                self.persisted_request_at = run.withdraw_requested_at_utc
+            self.withdraw_processed = True
+            raise RuntimeError("simulated lost withdrawal response")
+
+        async def status(self, verification_id):
+            if not self.withdraw_processed:
+                return await super().status(verification_id)
+            return PaymentLifecycleStatus(
+                verification_id=self.verification_id,
+                state="WITHDRAWN",
+                authorization_usd="25.00",
+                captured_usd="1.23",
+                result_available=False,
+                publication_allowed=False,
+                reconciliation_required=False,
+            )
+
+    dataset_id = make_dataset(tmp_path, monkeypatch)
+    client = LostResponseClient()
+    await prepare_quote(dataset_id, prepare_body(), client=client)
+    await start(
+        dataset_id,
+        request=start_body(),
+        client=client,
+        scanner=FakeScanner(dataset_id),
+        install_id="install_fixture",
+        install_private_key=object(),
+    )
+    await lifecycle_command(dataset_id, "publish", client=client)
+    with pytest.raises(RuntimeError, match="lost withdrawal response"):
+        await lifecycle_command(dataset_id, "withdraw", client=client)
+
+    refreshed = await refresh(dataset_id, client=client)
+    requested_at = client.persisted_request_at.replace(tzinfo=timezone.utc)
+    assert refreshed.state == "WITHDRAWN"
+    assert refreshed.active_publication["withdrawn_at_utc"] == (
+        requested_at.isoformat().replace("+00:00", "Z")
+    )
+    monkeypatch.setattr(
+        local_service, "_now_utc", lambda: requested_at + timedelta(days=29)
+    )
+    assert get_view(dataset_id).active_publication["withdrawn_at_utc"] == (
+        requested_at.isoformat().replace("+00:00", "Z")
+    )
+
+
+@pytest.mark.asyncio
+async def test_withdraw_status_body_timestamp_is_preferred_over_transport_date(
+    tmp_path, monkeypatch
+):
+    class BodyTimestampClient(FakeClient):
+        async def command(self, command):
+            result = await super().command(command)
+            if command.requested_action == "withdraw":
+                return LifecycleCommandResult(
+                    status=result.status.model_copy(
+                        update={
+                            "withdrawn_at_utc": datetime(
+                                2026, 8, 21, 7, 15, tzinfo=timezone.utc
+                            )
+                        }
+                    ),
+                    server_date_utc=datetime(
+                        2026, 8, 22, 18, 30, tzinfo=timezone.utc
+                    ),
+                )
+            return result
+
+    dataset_id = make_dataset(tmp_path, monkeypatch)
+    client = BodyTimestampClient()
+    await prepare_quote(dataset_id, prepare_body(), client=client)
+    await start(
+        dataset_id,
+        request=start_body(),
+        client=client,
+        scanner=FakeScanner(dataset_id),
+        install_id="install_fixture",
+        install_private_key=object(),
+    )
+    await lifecycle_command(dataset_id, "publish", client=client)
+    withdrawn = await lifecycle_command(dataset_id, "withdraw", client=client)
+    assert withdrawn.active_publication["withdrawn_at_utc"] == "2026-08-21T07:15:00Z"
+
+
+def _accepted_recovery_run(
+    dataset_id: str,
+    *,
+    verification_id: str | None,
+    start_claimed: bool,
+    scan_claimed: bool,
+) -> DataVerificationRun:
+    with get_session_context() as session:
+        run = session.exec(
+            select(DataVerificationRun).where(DataVerificationRun.dataset_id == dataset_id)
+        ).one()
+        run.accepted_at_utc = datetime(2026, 8, 22, 12, tzinfo=timezone.utc)
+        run.publication_terms_ack = True
+        run.corpus_ack = True
+        run.verification_id = verification_id
+        run.start_claimed = start_claimed
+        run.scan_claimed = scan_claimed
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        return run
+
+
+@pytest.mark.asyncio
+async def test_restart_reexecutes_deterministic_scan_for_persisted_claims(
+    tmp_path, monkeypatch
+):
+    dataset_id = make_dataset(tmp_path, monkeypatch)
+    client = FakeClient()
+    scanner = FakeScanner(dataset_id)
+    await prepare_quote(dataset_id, prepare_body(), client=client)
+    with get_session_context() as session:
+        quoted = session.exec(
+            select(DataVerificationRun).where(
+                DataVerificationRun.dataset_id == dataset_id
+            )
+        ).one()
+        expected_id = str(
+            uuid5(NAMESPACE_URL, f"{dataset_id}:{quoted.idempotency_key}")
+        )
+    _accepted_recovery_run(
+        dataset_id,
+        verification_id=expected_id,
+        start_claimed=True,
+        scan_claimed=True,
+    )
+    monkeypatch.setattr(local_service, "CLAIM_WAIT_ATTEMPTS", 1)
+
+    recovered = await start(
+        dataset_id,
+        request=start_body(),
+        client=client,
+        scanner=scanner,
+        install_id="install_fixture",
+        install_private_key=object(),
+    )
+
+    with get_session_context() as session:
+        runs = session.exec(
+            select(DataVerificationRun).where(
+                DataVerificationRun.dataset_id == dataset_id
+            )
+        ).all()
+    expected_report = json.loads((FIXTURES / "report.json").read_text())
+    expected_report.update(
+        verification_id=expected_id,
+        listing_id=LISTING_ID,
+        source_handle_id=dataset_id,
+        install_key_id="install_fixture",
+    )
+    assert recovered.state == "CAPTURED"
+    assert len(runs) == 1
+    assert runs[0].verification_id == expected_id
+    assert (client.start_calls, client.ingest_calls, scanner.calls) == (1, 1, 1)
+    assert client.last_report == expected_report
+
+
+@pytest.mark.asyncio
+async def test_restart_recovers_start_claim_without_verification_identity(
+    tmp_path, monkeypatch
+):
+    dataset_id = make_dataset(tmp_path, monkeypatch)
+    client = FakeClient()
+    scanner = FakeScanner(dataset_id)
+    await prepare_quote(dataset_id, prepare_body(), client=client)
+    _accepted_recovery_run(
+        dataset_id,
+        verification_id=None,
+        start_claimed=True,
+        scan_claimed=False,
+    )
+    monkeypatch.setattr(local_service, "CLAIM_WAIT_ATTEMPTS", 1)
+
+    recovered = await start(
+        dataset_id,
+        request=start_body(),
+        client=client,
+        scanner=scanner,
+        install_id="install_fixture",
+        install_private_key=object(),
+    )
+
+    assert recovered.state == "CAPTURED"
+    assert (client.start_calls, client.ingest_calls, scanner.calls) == (1, 1, 1)
+    assert recovered.payment_status.verification_id == client.verification_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terminated_claim", "expected_start_requests"),
+    [("start_claimed", 1), ("scan_claimed", 2)],
+)
+async def test_restart_after_each_claim_compare_and_set_completes_once(
+    tmp_path, monkeypatch, terminated_claim, expected_start_requests
+):
+    class SimulatedTermination(BaseException):
+        pass
+
+    dataset_id = make_dataset(tmp_path, monkeypatch)
+    client = FakeClient()
+    scanner = FakeScanner(dataset_id)
+    await prepare_quote(dataset_id, prepare_body(), client=client)
+    original_claim = local_service._claim
+    terminated = False
+
+    def terminate_after_claim(run_id, field):
+        nonlocal terminated
+        claimed = original_claim(run_id, field)
+        if field == terminated_claim and claimed and not terminated:
+            terminated = True
+            raise SimulatedTermination()
+        return claimed
+
+    monkeypatch.setattr(local_service, "_claim", terminate_after_claim)
+    with pytest.raises(SimulatedTermination):
+        await start(
+            dataset_id,
+            request=start_body(),
+            client=client,
+            scanner=scanner,
+            install_id="install_fixture",
+            install_private_key=object(),
+        )
+    monkeypatch.setattr(local_service, "_claim", original_claim)
+    monkeypatch.setattr(local_service, "CLAIM_WAIT_ATTEMPTS", 1)
+
+    recovered = await start(
+        dataset_id,
+        request=start_body(),
+        client=client,
+        scanner=scanner,
+        install_id="install_fixture",
+        install_private_key=object(),
+    )
+
+    with get_session_context() as session:
+        runs = session.exec(
+            select(DataVerificationRun).where(
+                DataVerificationRun.dataset_id == dataset_id
+            )
+        ).all()
+    assert recovered.state == "CAPTURED"
+    assert len(runs) == 1
+    assert runs[0].verification_id == client.verification_id
+    assert client.start_calls == 1
+    assert client.start_requests == expected_start_requests
+    assert scanner.calls == 1
+    assert client.ingest_calls == 1

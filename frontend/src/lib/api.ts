@@ -332,6 +332,7 @@ export interface DataVerificationPaymentStatus {
   result_available: boolean;
   publication_allowed: boolean;
   reconciliation_required: boolean;
+  withdrawn_at_utc?: string | null;
 }
 
 export interface DataVerificationView {
@@ -346,7 +347,14 @@ export interface DataVerificationView {
   quote_probe: DataVerificationQuoteProbe | null;
   quote: DataVerificationQuote | null;
   payment_status: DataVerificationPaymentStatus | null;
-  report_ingest: { verification_id: string; accepted: true; terminal_error_code: string | null; narrative_state: 'grounded' | 'withheld_grounding_failed' | null } | null;
+  report_ingest: {
+    verification_id: string;
+    accepted: true;
+    terminal_error_code: string | null;
+    narrative_state: 'grounded' | 'withheld_grounding_failed' | null;
+    narrative?: string | null;
+    listing_claim_comparison?: string | null;
+  } | null;
   findings: Record<string, unknown> | null;
   d8_preview: Array<Record<string, unknown>> | null;
   active_publication: {

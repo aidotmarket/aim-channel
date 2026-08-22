@@ -41,6 +41,9 @@ class DataVerificationRun(SQLModel, table=True):
     d8_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
     start_claimed: bool = Field(default=False, sa_column=Column(Boolean, nullable=False))
     scan_claimed: bool = Field(default=False, sa_column=Column(Boolean, nullable=False))
+    withdraw_requested_at_utc: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(), nullable=True)
+    )
     withdrawn_at_utc: Optional[datetime] = Field(
         default=None, sa_column=Column(DateTime(), nullable=True)
     )

@@ -112,8 +112,11 @@ function VerificationArtifact({
   const narrative = reportIngest?.narrative_state === "withheld_grounding_failed"
     ? "allAI interpretation withheld because grounding validation failed"
     : reportIngest?.narrative_state === "grounded"
-      ? "Server returned narrative_state: grounded. The report-ingest response returned no narrative text and no listing-claim comparison."
+      ? reportIngest.narrative || "The grounded allAI interpretation text is not yet available from the server."
       : `Server returned narrative_state: ${reportIngest?.narrative_state ?? "null"}. The report-ingest response returned no narrative text and no listing-claim comparison.`;
+  const listingClaimComparison = reportIngest?.narrative_state === "withheld_grounding_failed"
+    ? "The report-ingest response returned no listing-claim comparison."
+    : reportIngest?.listing_claim_comparison || "The listing-claim comparison is not yet available from the server.";
 
   return (
     <section aria-label={label} className="space-y-4 rounded border p-4">
@@ -163,7 +166,7 @@ function VerificationArtifact({
         </div>
       )}
       <div className="rounded border p-4 text-sm"><h4 className="font-medium">allAI interpretation</h4><p>{narrative}</p></div>
-      <div className="rounded border p-4 text-sm"><h4 className="font-medium">Listing-claim comparison</h4><p>The report-ingest response returned no listing-claim comparison.</p></div>
+      <div className="rounded border p-4 text-sm"><h4 className="font-medium">Listing-claim comparison</h4><p>{listingClaimComparison}</p></div>
       {reportIngest?.terminal_error_code && <p className="text-sm">Server returned terminal_error_code: {reportIngest.terminal_error_code}</p>}
       <p className="text-sm">{copyWithDate(dataVerificationV1.copy.attestation, report.completed_at_utc)}</p>
       <p className="text-sm">{copyWithDate(dataVerificationV1.copy.disclaimer, report.completed_at_utc)}</p>
@@ -302,6 +305,11 @@ export function DataVerificationFlow({ datasetId, sourceName, listingId }: { dat
   const canCancel = Boolean(state && ["AUTHORIZING", "AUTHORIZED", "SCANNING_LOCAL", "NARRATING_CLOUD", "CAPTURE_PENDING", "CAPTURE_RECONCILING"].includes(state));
   const lateCancel = Boolean(state && ["NARRATING_CLOUD", "CAPTURE_PENDING", "CAPTURE_RECONCILING"].includes(state));
   const report = view.findings as ArtifactReport | null;
+  const groundedReviewReady = view.report_ingest?.narrative_state === "grounded" && Boolean(
+    view.report_ingest.narrative?.trim() && view.report_ingest.listing_claim_comparison?.trim()
+  );
+  const fingerprintNoticeReady = view.report_ingest?.narrative_state === "withheld_grounding_failed";
+  const publicationReviewUnavailable = !(groundedReviewReady || fingerprintNoticeReady);
 
   return (
     <Card aria-label="Data verification" className="border-primary/30">
@@ -327,7 +335,7 @@ export function DataVerificationFlow({ datasetId, sourceName, listingId }: { dat
         )}
         {view.active_publication?.publication_state === "WITHDRAWN" && (
           <p aria-label="Withdrawal marker" className="rounded border p-4 text-sm">
-            Scan findings withdrawn by seller on {displayDate(view.active_publication.withdrawn_at_utc)}
+            Scan findings withdrawn by seller on {displayDate(view.active_publication.withdrawn_at_utc)}; buyers see this notice for 30 days.
           </p>
         )}
 
@@ -422,7 +430,12 @@ export function DataVerificationFlow({ datasetId, sourceName, listingId }: { dat
                   capturedUsd={status.captured_usd}
                   label="Captured scan review"
                 />
-                {state === "CAPTURED" && <div className="grid gap-3 sm:grid-cols-2"><Button onClick={() => command("publish")} disabled={busy || !status.publication_allowed}>{dataVerificationV1.copy.publishAction}</Button><Button variant="outline" onClick={() => command("decline")} disabled={busy}>{dataVerificationV1.copy.declineAction}</Button></div>}
+                {publicationReviewUnavailable && (
+                  <p className="rounded border p-3 text-sm">
+                    The full allAI interpretation text must be reviewed before publication and is not yet available from the server. You can still decline publication.
+                  </p>
+                )}
+                {state === "CAPTURED" && <div className="grid gap-3 sm:grid-cols-2"><Button onClick={() => command("publish")} disabled={busy || !status.publication_allowed || publicationReviewUnavailable}>{dataVerificationV1.copy.publishAction}</Button><Button variant="outline" onClick={() => command("decline")} disabled={busy}>{dataVerificationV1.copy.declineAction}</Button></div>}
               </section>
             )}
 

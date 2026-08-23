@@ -1,12 +1,16 @@
 import base64
 import hashlib
+import io
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 import httpx
+import pyarrow as pa
+import pyarrow.parquet as pq
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -18,7 +22,12 @@ from app.models.s3_connection import S3Connection
 from app.models.s3_object_metadata import S3ObjectMetadata
 from app.models.s3_scan_job import S3ScanJob
 from app.services import source_artifact_resolver as resolver
-from app.services.data_verification.contract import ContractError, REPORT_FIELD_CONTRACT
+from app.services.data_verification.contract import (
+    ContractError,
+    REPORT_FIELD_CONTRACT,
+    assert_report_field_contract,
+)
+from app.services.data_verification.connectors.eolymp_v1 import APPROVED_COLUMN_TYPES
 from app.services.data_verification.scanner import (
     DataVerificationScanner,
     ScanRefusedError,
@@ -99,6 +108,12 @@ def _local_dataset(tmp_path, monkeypatch, payload: bytes, suffix="csv"):
     return listing_id, dataset_id
 
 
+def _parquet_payload(columns: dict[str, pa.Array]) -> bytes:
+    stream = io.BytesIO()
+    pq.write_table(pa.table(columns), stream)
+    return stream.getvalue()
+
+
 def test_signed_spec_binds_complete_contract_and_rejects_tamper(tmp_path, monkeypatch):
     listing_id, dataset_id = _local_dataset(tmp_path, monkeypatch, b"id\n1\n")
     spec = _signed_spec(listing_id=listing_id, source_handle_id=dataset_id)
@@ -130,9 +145,120 @@ def test_one_two_and_low_cardinality_aggregates_are_suppressed(tmp_path, monkeyp
     for field in ("null_rate", "approx_distinct_count", "length_histograms", "numeric_range_buckets"):
         values = result.report["objects"][0][field]
         if payload.count(b"\n") <= 3:
-            assert values == ["suppressed_low_occupancy"] * len(values)
+            column_types = result.report["objects"][0]["column_types"]
+            for column_type, value in zip(column_types, values):
+                if field == "length_histograms" and column_type not in {"string", "binary"}:
+                    assert value is None
+                elif field == "numeric_range_buckets" and column_type not in {
+                    "integer",
+                    "float",
+                    "decimal",
+                }:
+                    assert value is None
+                else:
+                    assert value == "suppressed_low_occupancy"
         else:
-            assert values[1] == "suppressed_low_occupancy"
+            if field == "approx_distinct_count":
+                assert values[1] == "suppressed_low_occupancy"
+            elif field == "null_rate":
+                assert values[1] == "0.000000"
+            elif field == "length_histograms":
+                assert all(count == 0 or count >= 10 for count in values[1])
+            else:
+                assert values[1] is None
+
+
+def test_sparse_categories_and_buckets_suppress_each_whole_aggregate(tmp_path, monkeypatch):
+    payload = _parquet_payload(
+        {
+            "sparse_null": pa.array([None] + [f"v{i:02d}" for i in range(1, 20)]),
+            "sparse_length": pa.array([f"v{i:02d}" for i in range(19)] + ["x" * 50]),
+            "sparse_numeric": pa.array(list(range(10, 29)) + [10_000], type=pa.int64()),
+        }
+    )
+    listing_id, dataset_id = _local_dataset(tmp_path, monkeypatch, payload, suffix="parquet")
+    result = _scanner().scan(
+        signed_spec=_signed_spec(listing_id=listing_id, source_handle_id=dataset_id),
+        d6_candidate=VALID_D6,
+        now=FIXED_NOW,
+    )
+    facts = result.report["objects"][0]
+
+    assert facts["null_rate"][0] == "suppressed_low_occupancy"
+    assert facts["approx_distinct_count"][0] != "suppressed_low_occupancy"
+    assert facts["length_histograms"][0] != "suppressed_low_occupancy"
+    assert all(count == 0 or count >= 10 for count in facts["length_histograms"][0])
+
+    assert facts["null_rate"][1] == "0.000000"
+    assert facts["approx_distinct_count"][1] != "suppressed_low_occupancy"
+    assert facts["length_histograms"][1] == "suppressed_low_occupancy"
+
+    assert facts["null_rate"][2] == "0.000000"
+    assert facts["approx_distinct_count"][2] != "suppressed_low_occupancy"
+    assert facts["numeric_range_buckets"][2] == "suppressed_low_occupancy"
+
+
+def _all_approved_types_payload() -> bytes:
+    rows = range(20)
+    return _parquet_payload(
+        {
+            "string_col": pa.array([f"value-{i}" for i in rows], type=pa.string()),
+            "integer_col": pa.array(rows, type=pa.int64()),
+            "float_col": pa.array([i + 0.5 for i in rows], type=pa.float64()),
+            "decimal_col": pa.array([Decimal(f"{i}.25") for i in rows], type=pa.decimal128(8, 2)),
+            "boolean_col": pa.array([i % 2 == 0 for i in rows], type=pa.bool_()),
+            "date_col": pa.array([date(2026, 1, 1) + timedelta(days=i) for i in rows], type=pa.date32()),
+            "datetime_col": pa.array(
+                [datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(hours=i) for i in rows],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+            "binary_col": pa.array([f"bytes-{i}".encode() for i in rows], type=pa.binary()),
+            "unknown_col": pa.nulls(20),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("column_name", "expected_type"),
+    [
+        ("string_col", "string"),
+        ("integer_col", "integer"),
+        ("float_col", "float"),
+        ("decimal_col", "decimal"),
+        ("boolean_col", "boolean"),
+        ("date_col", "date"),
+        ("datetime_col", "datetime"),
+        ("binary_col", "binary"),
+        ("unknown_col", "unknown"),
+    ],
+)
+def test_scanner_report_maps_every_approved_column_type_and_matches_contract(
+    tmp_path, monkeypatch, column_name, expected_type
+):
+    payload = _all_approved_types_payload()
+    listing_id, dataset_id = _local_dataset(tmp_path, monkeypatch, payload, suffix="parquet")
+    result = _scanner().scan(
+        signed_spec=_signed_spec(listing_id=listing_id, source_handle_id=dataset_id),
+        d6_candidate=VALID_D6,
+        now=FIXED_NOW,
+    )
+
+    assert_report_field_contract(result.report)
+    facts = result.report["objects"][0]
+    column_types = facts["column_types"]
+    assert column_types == [
+        "string",
+        "integer",
+        "float",
+        "decimal",
+        "boolean",
+        "date",
+        "datetime",
+        "binary",
+        "unknown",
+    ]
+    assert set(column_types) == APPROVED_COLUMN_TYPES
+    assert column_types[facts["column_names"].index(column_name)] == expected_type
 
 
 def test_deterministic_local_scan_has_byte_identical_facts_and_valid_receipt(tmp_path, monkeypatch):

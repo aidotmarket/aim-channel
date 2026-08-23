@@ -31,9 +31,16 @@ from app.schemas.data_verification import (
     ScanSpecIssueRequest,
     StartVerificationRequest,
 )
-from app.services.data_verification.scanner import DataVerificationScanner, ScanRefusedError
+from app.services.data_verification.scanner import (
+    DataVerificationScanner,
+    ScanRefusedError,
+    terminal_receipt_signature_binding,
+)
 from app.services.data_verification_client import DataVerificationClient
-from app.services.data_verification.connectors.eolymp_v1 import probe_object_count
+from app.services.data_verification.connectors.eolymp_v1 import (
+    probe_object_count,
+    validate_artifact_schema,
+)
 from app.services.marketplace_action_signer import canonical_json_bytes, sign_receipt_payload
 from app.services.source_artifact_resolver import resolve_source_artifact
 
@@ -193,6 +200,8 @@ def _probe(
             payload = path.read_bytes()
             size_bytes = len(payload)
             objects_discovered = probe_object_count(path.name, payload)
+            if path.suffix.lower() != ".zip":
+                validate_artifact_schema(path.name, payload)
         except OSError as exc:
             raise DataVerificationLocalError("registered listing source is unavailable") from exc
         except ValueError as exc:
@@ -535,7 +544,9 @@ def _terminal_report(
         "canonicalization_version": "python-json-sort-compact-v1",
         "signature_algorithm": "Ed25519",
     }
-    report["receipt_signature"] = sign_receipt_payload(report, install_private_key)
+    report["receipt_signature"] = sign_receipt_payload(
+        terminal_receipt_signature_binding(report), install_private_key
+    )
     return report
 
 

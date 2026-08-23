@@ -1,4 +1,10 @@
-"""Local deterministic scan orchestration and receipt construction."""
+"""Local deterministic scan orchestration and receipt construction.
+
+Receipt signatures use one domain policy: each report shape is signed only through
+an explicitly enumerated binding function.  Success reports keep the frozen Gate 1
+ten-field binding; terminal reports use their separately enumerated terminal binding.
+Adding a report field therefore never widens either signature domain implicitly.
+"""
 
 from __future__ import annotations
 
@@ -61,6 +67,27 @@ def receipt_signature_binding(report: dict[str, Any]) -> dict[str, Any]:
         "duration_ms": report["duration_ms"],
         "coverage": report["coverage"],
         "fingerprint_hash": report["fingerprint_hash"],
+    }
+
+
+def terminal_receipt_signature_binding(report: dict[str, Any]) -> dict[str, Any]:
+    """The exact terminal-report fields covered by the install signature."""
+    return {
+        "verification_id": report["verification_id"],
+        "listing_id": report["listing_id"],
+        "source_handle_id": report["source_handle_id"],
+        "spec_id": report["spec_id"],
+        "spec_version": report["spec_version"],
+        "spec_hash": report["spec_hash"],
+        "nonce_echo": report["nonce_echo"],
+        "install_key_id": report["install_key_id"],
+        "agent_version": report["agent_version"],
+        "connector_type": report["connector_type"],
+        "connector_version": report["connector_version"],
+        "terminal_error_code": report["terminal_error_code"],
+        "completed_at_utc": report["completed_at_utc"],
+        "canonicalization_version": report["canonicalization_version"],
+        "signature_algorithm": report["signature_algorithm"],
     }
 
 

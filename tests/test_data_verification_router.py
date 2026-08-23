@@ -62,16 +62,17 @@ async def test_lifecycle_client_contract_paths_claims_and_canonical_payloads():
         response_headers = {
             "Date": "invalid-date" if route_name == "withdraw" else "Sat, 22 Aug 2026 18:30:00 GMT"
         }
+        result_available = route_name != "status"
         return httpx.Response(200, headers=response_headers, json={
             "verification_id": VERIFICATION_ID,
-            "state": "CAPTURED",
+            "state": "CAPTURED" if result_available else "NARRATING_CLOUD",
             "authorization_usd": "25.00",
-            "captured_usd": "1.00",
-            "result_available": True,
-            "publication_allowed": True,
+            "captured_usd": "1.00" if result_available else None,
+            "result_available": result_available,
+            "publication_allowed": result_available,
             "reconciliation_required": False,
-            "narrative": None if route_name == "status" else "Grounded allAI narrative fixture.",
-            "listing_claim_comparison": None if route_name == "status" else "Listing claims match the deterministic scan fixture.",
+            "narrative": "Grounded allAI narrative fixture." if result_available else None,
+            "listing_claim_comparison": "Listing claims match the deterministic scan fixture." if result_available else None,
         })
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
@@ -126,9 +127,13 @@ async def test_lifecycle_client_contract_paths_claims_and_canonical_payloads():
     requirements = contract["chunk_6_response_requirements"]
     assert ingest.narrative == "Grounded allAI narrative fixture."
     assert ingest.listing_claim_comparison == "Listing claims match the deterministic scan fixture."
+    assert status.state == "NARRATING_CLOUD"
+    assert status.result_available is False
     assert status.narrative is None
     assert status.listing_claim_comparison is None
     for result in command_results.values():
+        assert result.status.state == "CAPTURED"
+        assert result.status.result_available is True
         assert result.status.narrative == "Grounded allAI narrative fixture."
         assert result.status.listing_claim_comparison == "Listing claims match the deterministic scan fixture."
     assert command_results["withdraw"].server_date_utc is None

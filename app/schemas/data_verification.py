@@ -152,6 +152,8 @@ class PaymentLifecycleStatus(StrictModel):
     result_available: StrictBool
     publication_allowed: StrictBool
     reconciliation_required: StrictBool
+    narrative: str | None = None
+    listing_claim_comparison: str | None = None
     withdrawn_at_utc: datetime | None = None
 
     @field_validator("withdrawn_at_utc")

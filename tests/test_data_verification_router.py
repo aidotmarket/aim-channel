@@ -70,6 +70,8 @@ async def test_lifecycle_client_contract_paths_claims_and_canonical_payloads():
             "result_available": True,
             "publication_allowed": True,
             "reconciliation_required": False,
+            "narrative": None if route_name == "status" else "Grounded allAI narrative fixture.",
+            "listing_claim_comparison": None if route_name == "status" else "Listing claims match the deterministic scan fixture.",
         })
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
@@ -110,7 +112,7 @@ async def test_lifecycle_client_contract_paths_claims_and_canonical_payloads():
             payment_disclosure_version="payment-disclosure-v1",
         ))
         ingest = await client.ingest_report(json.loads((FIXTURES / "report.json").read_text()))
-        await client.status(VERIFICATION_ID)
+        status = await client.status(VERIFICATION_ID)
         command_results = {}
         for action in ("cancel", "publish", "decline", "withdraw"):
             command_results[action] = await client.command(LifecycleCommand(
@@ -124,6 +126,11 @@ async def test_lifecycle_client_contract_paths_claims_and_canonical_payloads():
     requirements = contract["chunk_6_response_requirements"]
     assert ingest.narrative == "Grounded allAI narrative fixture."
     assert ingest.listing_claim_comparison == "Listing claims match the deterministic scan fixture."
+    assert status.narrative is None
+    assert status.listing_claim_comparison is None
+    for result in command_results.values():
+        assert result.status.narrative == "Grounded allAI narrative fixture."
+        assert result.status.listing_claim_comparison == "Listing claims match the deterministic scan fixture."
     assert command_results["withdraw"].server_date_utc is None
     assert requirements["grounded_result_projection"]["must_carry_display_safe_fields"] == [
         "narrative",

@@ -1,5 +1,7 @@
 import os
 from datetime import datetime, timezone
+from itertools import combinations
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -10,6 +12,8 @@ from app.models.s3_connection import S3Connection
 from app.models.s3_object_metadata import S3ObjectMetadata
 from app.models.s3_scan_job import S3ScanJob
 from app.services import source_artifact_resolver as resolver
+from app.services.data_verification.connectors.eolymp_v1 import object_commitment
+from app.services.marketplace_action_signer import canonical_json_bytes
 
 
 def _dataset(*, listing_id: str, dataset_id: str, filename: str, processed_path=None):
@@ -71,7 +75,7 @@ def test_local_resolver_detects_in_place_content_replacement(tmp_path, monkeypat
         resolver.assert_artifact_still_pinned(pinned)
 
 
-def test_s3_resolver_commitment_changes_with_registered_key(tmp_path, monkeypatch):
+def test_s3_resolver_commitment_changes_with_hmac_key_and_registered_object(tmp_path, monkeypatch):
     monkeypatch.setattr(resolver.settings, "upload_directory", str(tmp_path / "uploads"))
     monkeypatch.setattr(resolver.settings, "processed_directory", str(tmp_path / "processed"))
     dataset_id = f"ds-{uuid4()}"
@@ -94,7 +98,9 @@ def test_s3_resolver_commitment_changes_with_registered_key(tmp_path, monkeypatc
         session.add(metadata)
         session.commit()
     pinned = resolver.resolve_source_artifact(listing_id)
+    assert pinned is not None
     before = pinned.locator_commitment(b"c" * 32)
+    assert pinned.locator_commitment(b"d" * 32) != before
     with get_session_context() as session:
         row = session.get(S3ObjectMetadata, metadata_id)
         row.object_key = "registered/changed.csv"
@@ -104,3 +110,82 @@ def test_s3_resolver_commitment_changes_with_registered_key(tmp_path, monkeypatc
     assert changed.locator_commitment(b"c" * 32) != before
     with pytest.raises(resolver.StaleArtifactIdentityError):
         resolver.assert_artifact_still_pinned(pinned)
+
+
+def test_cloud_visible_commitments_offer_no_dictionary_equality_or_ordering_oracle():
+    dataset = SimpleNamespace()
+    artifacts = [
+        resolver.ResolvedArtifact(
+            listing_id="listing-local-1",
+            source_handle_id="dataset-local-1",
+            dataset=dataset,
+            kind="local",
+            local_path="/srv/aim-data/customers/acme/orders-2026.parquet",
+        ),
+        resolver.ResolvedArtifact(
+            listing_id="listing-local-2",
+            source_handle_id="dataset-local-2",
+            dataset=dataset,
+            kind="local",
+            local_path="/Users/alice/Library/Application Support/AIM Data/private/customers.csv",
+        ),
+        resolver.ResolvedArtifact(
+            listing_id="listing-s3-1",
+            source_handle_id="dataset-s3-1",
+            dataset=dataset,
+            kind="s3",
+            connection=SimpleNamespace(id="conn-prod-eu-west-1", bucket="acme-private-analytics"),
+            metadata=SimpleNamespace(object_key="exports/2026/08/customers.parquet"),
+        ),
+        resolver.ResolvedArtifact(
+            listing_id="listing-s3-2",
+            source_handle_id="dataset-s3-2",
+            dataset=dataset,
+            kind="s3",
+            connection=SimpleNamespace(id="conn-finance-us-east-1", bucket="finance-ledger-private"),
+            metadata=SimpleNamespace(object_key="daily/2026-08-24/ledger.jsonl"),
+        ),
+    ]
+    object_names = [
+        "warehouse_prod.public.customers",
+        "analytics.sales.orders_2026",
+        "archives/2026-08-24/customers.csv",
+        "registered-root",
+        "objects/private/customer-events.jsonl",
+    ]
+    commitment_keys = [bytes([value]) * 32 for value in (11, 22, 33)]
+
+    commitments_by_key = []
+    for key in commitment_keys:
+        commitments_by_key.append(
+            [artifact.locator_commitment(key) for artifact in artifacts]
+            + [object_commitment(key, b"dataset-handle-private", name) for name in object_names]
+        )
+
+    visible = canonical_json_bytes(commitments_by_key)
+    raw_dictionary = [
+        artifact.canonical_locator_bytes() for artifact in artifacts
+    ] + [name.encode("utf-8") for name in object_names]
+    assert all(candidate not in visible for candidate in raw_dictionary)
+
+    for position in range(len(commitments_by_key[0])):
+        assert len({commitments[position] for commitments in commitments_by_key}) == len(commitment_keys)
+    for left, right in combinations(commitments_by_key, 2):
+        assert set(left).isdisjoint(right)
+        assert any(
+            (left[first] < left[second]) != (right[first] < right[second])
+            for first in range(len(left))
+            for second in range(first + 1, len(left))
+        )
+
+    attacker_keys = [bytes([value]) * 32 for value in (44, 55)]
+    attacker_guesses = {
+        artifact.locator_commitment(key)
+        for key in attacker_keys
+        for artifact in artifacts
+    } | {
+        object_commitment(key, b"dataset-handle-private", name)
+        for key in attacker_keys
+        for name in object_names
+    }
+    assert all(attacker_guesses.isdisjoint(commitments) for commitments in commitments_by_key)

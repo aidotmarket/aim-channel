@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import io
 import json
 import zipfile
@@ -7,6 +8,8 @@ from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
 import pytest
+import pyarrow as pa
+import pyarrow.parquet as pq
 from sqlmodel import SQLModel, select
 
 from app.core.database import get_engine, get_session_context
@@ -23,7 +26,10 @@ from app.schemas.data_verification import (
 from app.services import data_verification_local_service as local_service
 from app.services import source_artifact_resolver as resolver
 from app.services.data_verification.contract import SignedScanSpec
-from app.services.data_verification.scanner import ScanExecution
+from app.services.data_verification.scanner import (
+    ScanExecution,
+    terminal_receipt_signature_binding,
+)
 from app.services.data_verification_local_service import (
     DataVerificationLocalError,
     get_view,
@@ -33,6 +39,7 @@ from app.services.data_verification_local_service import (
     start,
 )
 from app.services.data_verification_client import LifecycleCommandResult
+from app.services.marketplace_action_signer import canonical_json_bytes
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "data_verification_v1"
@@ -175,7 +182,7 @@ def enabled(monkeypatch):
     SQLModel.metadata.create_all(get_engine())
 
 
-def make_dataset(tmp_path, monkeypatch, *, suffix="csv"):
+def make_dataset(tmp_path, monkeypatch, *, suffix="csv", payload: bytes | None = None):
     dataset_id = f"ds-{tmp_path.name}"[-36:]
     uploads = tmp_path / "uploads"
     processed = tmp_path / "processed"
@@ -184,7 +191,7 @@ def make_dataset(tmp_path, monkeypatch, *, suffix="csv"):
     monkeypatch.setattr(resolver.settings, "upload_directory", str(uploads))
     monkeypatch.setattr(resolver.settings, "processed_directory", str(processed))
     filename = f"source.{suffix}"
-    (uploads / filename).write_text("id,name\n1,alpha\n")
+    (uploads / filename).write_bytes(payload or b"id,name\n1,alpha\n")
     with get_session_context() as session:
         session.add(DatasetRecord(
             id=dataset_id,
@@ -212,6 +219,12 @@ def start_body():
         publication_terms_ack=True,
         corpus_ack=True,
     )
+
+
+def _parquet_payload(table: pa.Table) -> bytes:
+    stream = io.BytesIO()
+    pq.write_table(table, stream)
+    return stream.getvalue()
 
 
 @pytest.mark.asyncio
@@ -309,6 +322,31 @@ def test_feature_flag_and_unsupported_connector_fail_closed(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_schema", ["oversized_name", "unsupported_type"])
+async def test_local_schema_rejection_happens_before_quote_http(
+    tmp_path, monkeypatch, invalid_schema
+):
+    if invalid_schema == "oversized_name":
+        table = pa.table({"x" * 257: pa.array(range(20), type=pa.int64())})
+    else:
+        table = pa.table(
+            {"unsupported": pa.array([[index] for index in range(20)], type=pa.list_(pa.int64()))}
+        )
+    dataset_id = make_dataset(
+        tmp_path,
+        monkeypatch,
+        suffix="parquet",
+        payload=_parquet_payload(table),
+    )
+    client = FakeClient()
+
+    with pytest.raises(DataVerificationLocalError, match="not fully supported"):
+        await prepare_quote(dataset_id, prepare_body(), client=client)
+
+    assert client.quote_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_feature_flag_blocks_cloud_refresh_and_lifecycle_commands(tmp_path, monkeypatch):
     dataset_id = make_dataset(tmp_path, monkeypatch)
     client = FakeClient()
@@ -326,6 +364,7 @@ async def test_local_failure_sends_only_bounded_terminal_report_and_hides_result
 
     dataset_id = make_dataset(tmp_path, monkeypatch)
     client = FakeClient(final_state="FAILED_VOIDED")
+    install_private_key = Ed25519PrivateKey.generate()
     await prepare_quote(dataset_id, prepare_body(), client=client)
     view = await start(
         dataset_id,
@@ -333,7 +372,7 @@ async def test_local_failure_sends_only_bounded_terminal_report_and_hides_result
         client=client,
         scanner=RefusingScanner(),
         install_id="install_fixture",
-        install_private_key=Ed25519PrivateKey.generate(),
+        install_private_key=install_private_key,
     )
     assert view.state == "FAILED_VOIDED"
     assert view.findings is None
@@ -341,6 +380,14 @@ async def test_local_failure_sends_only_bounded_terminal_report_and_hides_result
     transmitted = json.dumps(client.last_report)
     assert "private/source.csv" not in transmitted
     assert "could not be decoded" not in transmitted
+    binding = terminal_receipt_signature_binding(client.last_report)
+    assert set(binding) == set(client.last_report) - {"receipt_signature"}
+    install_private_key.public_key().verify(
+        base64.b64decode(client.last_report["receipt_signature"]),
+        canonical_json_bytes(binding),
+    )
+    widened = {**client.last_report, "unapproved_field": "not-covered"}
+    assert terminal_receipt_signature_binding(widened) == binding
 
 
 @pytest.mark.asyncio

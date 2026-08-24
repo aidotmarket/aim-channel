@@ -200,8 +200,7 @@ def _probe(
             payload = path.read_bytes()
             size_bytes = len(payload)
             objects_discovered = probe_object_count(path.name, payload)
-            if path.suffix.lower() != ".zip":
-                validate_artifact_schema(path.name, payload)
+            validate_artifact_schema(path.name, payload)
         except OSError as exc:
             raise DataVerificationLocalError("registered listing source is unavailable") from exc
         except ValueError as exc:

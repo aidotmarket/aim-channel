@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import hmac
 import io
 import json
 from datetime import date, datetime, timedelta, timezone
@@ -27,7 +28,12 @@ from app.services.data_verification.contract import (
     REPORT_FIELD_CONTRACT,
     assert_report_field_contract,
 )
-from app.services.data_verification.connectors.eolymp_v1 import APPROVED_COLUMN_TYPES
+from app.services.data_verification import scanner as scanner_module
+from app.services.data_verification.connectors import eolymp_v1
+from app.services.data_verification.connectors.eolymp_v1 import (
+    APPROVED_COLUMN_TYPES,
+    EolympConnectorV1,
+)
 from app.services.data_verification.scanner import (
     DataVerificationScanner,
     ScanRefusedError,
@@ -112,6 +118,104 @@ def _parquet_payload(columns: dict[str, pa.Array]) -> bytes:
     stream = io.BytesIO()
     pq.write_table(pa.table(columns), stream)
     return stream.getvalue()
+
+
+def _connector_facts(payload: bytes, *, minimum_aggregate_occupancy: int):
+    return EolympConnectorV1().scan_bytes(
+        artifact_name="fixture.parquet",
+        payload=payload,
+        commitment_key=COMMITMENT_KEY,
+        source_binding=b"dataset-s1590-fixture",
+        deterministic_seed="00" * 32,
+        minimum_aggregate_occupancy=minimum_aggregate_occupancy,
+        length_bounds=(0, 1, 4, 8, 16, 32, 64, 128, 256),
+        numeric_boundaries=(-1000.0, -100.0, -10.0, 0.0, 10.0, 100.0, 1000.0),
+        max_inference_input_tokens=8192,
+        preview_requested=True,
+    )["objects"][0]
+
+
+@pytest.mark.parametrize(
+    ("threshold", "estimate", "suppressed"),
+    [
+        (3, 0, False),
+        (3, 1, True),
+        (3, 2, True),
+        (3, 3, False),
+        (10, 0, False),
+        (10, 9, True),
+        (10, 10, False),
+        (10, 11, False),
+    ],
+)
+def test_approx_distinct_emitter_rejects_ambiguous_integer_support(
+    monkeypatch, threshold, estimate, suppressed
+):
+    payload = _parquet_payload({"value": pa.array(range(20), type=pa.int64())})
+    monkeypatch.setattr(eolymp_v1, "_hll_estimate", lambda *_args: estimate)
+
+    value = _connector_facts(
+        payload, minimum_aggregate_occupancy=threshold
+    )["approx_distinct_count"][0]
+
+    if suppressed:
+        assert value == "suppressed_low_occupancy"
+    else:
+        assert value["estimate"] == estimate
+
+
+@pytest.mark.parametrize(
+    ("threshold", "row_count", "null_count", "suppressed"),
+    [
+        (3, 20, 1, True),
+        (10, 20, 1, True),
+        (3, 20, 19, True),
+        (10, 20, 19, True),
+        (3, 6, 3, False),
+        (10, 20, 10, False),
+        (3, 12, 0, False),
+        (10, 12, 0, False),
+        (3, 12, 12, False),
+        (10, 12, 12, False),
+    ],
+)
+def test_null_rate_emitter_rejects_ambiguous_formatter_preimages(
+    threshold, row_count, null_count, suppressed
+):
+    values = [None] * null_count + list(range(row_count - null_count))
+    payload = _parquet_payload({"value": pa.array(values, type=pa.int64())})
+
+    value = _connector_facts(
+        payload, minimum_aggregate_occupancy=threshold
+    )["null_rate"][0]
+
+    assert (value == "suppressed_low_occupancy") is suppressed
+    if not suppressed:
+        assert value == eolymp_v1._format_null_rate(null_count, row_count)
+
+
+@pytest.mark.parametrize("threshold", [3, 10])
+def test_null_rate_large_endpoint_preimages_include_sparse_support(threshold):
+    row_count = 15_000_000
+
+    assert eolymp_v1._format_null_rate(0, row_count) == "0.000000"
+    assert eolymp_v1._null_rate_preimage_range("0.000000", row_count) == (0, 7)
+    assert eolymp_v1._null_rate_has_ambiguous_sparse_support(
+        "0.000000", row_count, threshold
+    )
+    assert eolymp_v1._format_null_rate(row_count, row_count) == "1.000000"
+    assert eolymp_v1._null_rate_preimage_range("1.000000", row_count) == (
+        row_count - 7,
+        row_count,
+    )
+    assert eolymp_v1._null_rate_has_ambiguous_sparse_support(
+        "1.000000", row_count, threshold
+    )
+
+
+def test_null_rate_formatter_uses_exact_half_even_ties():
+    assert eolymp_v1._format_null_rate(1, 2_000_000) == "0.000000"
+    assert eolymp_v1._format_null_rate(3, 2_000_000) == "0.000002"
 
 
 def test_signed_spec_binds_complete_contract_and_rejects_tamper(tmp_path, monkeypatch):
@@ -441,7 +545,57 @@ def test_unsupported_shape_and_budget_refuse_instead_of_partial_report(tmp_path,
         _scanner().scan(signed_spec=spec, d6_candidate=VALID_D6, now=FIXED_NOW)
 
 
-def test_folded_fixture_digests_and_canonicalization_match_backend_contract():
+def _regenerated_fixture_report(tmp_path, monkeypatch):
+    payload = b"problem_id,difficulty,accepted_count\n" + b"\n".join(
+        f"{index},level_{index},{index * 10}".encode() for index in range(1, 13)
+    ) + b"\n"
+    source_path = tmp_path / "fixture.csv"
+    source_path.write_bytes(payload)
+    expected_locator = b"local\x00/fixture/registered.csv"
+
+    class FixtureArtifact:
+        listing_id = "11111111-1111-4111-8111-111111111111"
+        source_handle_id = "dataset-s1590-fixture"
+        kind = "local"
+        local_path = str(source_path)
+
+        @staticmethod
+        def locator_commitment(commitment_key):
+            return hmac.new(commitment_key, expected_locator, hashlib.sha256).hexdigest()
+
+    artifact = FixtureArtifact()
+    monkeypatch.setattr(scanner_module, "resolve_source_artifact", lambda _listing_id: artifact)
+    monkeypatch.setattr(scanner_module, "assert_artifact_still_pinned", lambda _artifact: None)
+    manifest = json.loads((FIXTURES / "schema_digests.json").read_text())
+    platform_key = serialization.load_pem_public_key(
+        base64.b64decode(manifest["backend_fixture_public_key_pem_base64"])
+    )
+    times = iter(
+        [
+            datetime(2026, 8, 21, 10, 5, 0, tzinfo=timezone.utc),
+            datetime(2026, 8, 21, 10, 5, 1, tzinfo=timezone.utc),
+        ]
+    )
+    fixture_scanner = DataVerificationScanner(
+        commitment_key=COMMITMENT_KEY,
+        install_private_key=INSTALL_PRIVATE_KEY,
+        install_key_id="install-fixture-key-v1",
+        platform_public_key=platform_key,
+        clock=lambda: next(times),
+    )
+    return fixture_scanner.scan(
+        signed_spec=json.loads((FIXTURES / "scan_spec.json").read_text()),
+        d6_candidate={
+            **VALID_D6,
+            "intended_use_tags": ["analysis_reporting", "research_education"],
+        },
+        now=FIXED_NOW,
+    ).report
+
+
+def test_folded_fixture_digests_and_canonicalization_match_backend_contract(
+    tmp_path, monkeypatch
+):
     manifest = json.loads((FIXTURES / "schema_digests.json").read_text())
     assert manifest["status"] == "folded_byte_identical_to_backend_3286e0726"
     assert manifest["canonicalization_version"] == "python-json-sort-compact-v1"
@@ -463,6 +617,7 @@ def test_folded_fixture_digests_and_canonicalization_match_backend_contract():
     )
     report = json.loads((FIXTURES / "report.json").read_text())
     assert set(report) == REPORT_FIELD_CONTRACT
+    assert report == _regenerated_fixture_report(tmp_path, monkeypatch)
     INSTALL_PRIVATE_KEY.public_key().verify(
         base64.b64decode(report["receipt_signature"]),
         canonical_json_bytes(receipt_signature_binding(report)),

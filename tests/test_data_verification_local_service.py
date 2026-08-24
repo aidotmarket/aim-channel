@@ -227,6 +227,14 @@ def _parquet_payload(table: pa.Table) -> bytes:
     return stream.getvalue()
 
 
+def _zip_payload(members: dict[str, bytes]) -> bytes:
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        for name, payload in members.items():
+            archive.writestr(name, payload)
+    return stream.getvalue()
+
+
 @pytest.mark.asyncio
 async def test_quote_start_capture_resume_and_publish_are_idempotent(tmp_path, monkeypatch):
     dataset_id = make_dataset(tmp_path, monkeypatch)
@@ -337,6 +345,37 @@ async def test_local_schema_rejection_happens_before_quote_http(
         monkeypatch,
         suffix="parquet",
         payload=_parquet_payload(table),
+    )
+    client = FakeClient()
+
+    with pytest.raises(DataVerificationLocalError, match="not fully supported"):
+        await prepare_quote(dataset_id, prepare_body(), client=client)
+
+    assert client.quote_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_schema", ["oversized_name", "unsupported_type"])
+async def test_zip_member_schema_rejection_happens_before_quote_http(
+    tmp_path, monkeypatch, invalid_schema
+):
+    if invalid_schema == "oversized_name":
+        table = pa.table({"x" * 257: pa.array(range(20), type=pa.int64())})
+    else:
+        table = pa.table(
+            {
+                "unsupported": pa.array(
+                    [[index] for index in range(20)], type=pa.list_(pa.int64())
+                )
+            }
+        )
+    dataset_id = make_dataset(
+        tmp_path,
+        monkeypatch,
+        suffix="zip",
+        payload=_zip_payload(
+            {"valid.csv": b"id\n1\n", "invalid.parquet": _parquet_payload(table)}
+        ),
     )
     client = FakeClient()
 
@@ -535,18 +574,10 @@ async def test_retry_after_report_persistence_gap_ingests_without_rescanning(tmp
 
 @pytest.mark.asyncio
 async def test_quote_precedes_stored_acceptance_and_zip_probe_is_honest(tmp_path, monkeypatch):
+    """ZIP preflight pays decompression cost for schema safety; counting stays metadata-only."""
     dataset_id = make_dataset(tmp_path, monkeypatch, suffix="zip")
-    archive_bytes = io.BytesIO()
-    with zipfile.ZipFile(archive_bytes, "w") as archive:
-        archive.writestr("a.csv", "id\n1\n")
-        archive.writestr("b.csv", "id\n2\n")
-    (tmp_path / "uploads" / "source.zip").write_bytes(archive_bytes.getvalue())
-    monkeypatch.setattr(
-        zipfile.ZipFile,
-        "read",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("the free zip probe must not decompress entries")
-        ),
+    (tmp_path / "uploads" / "source.zip").write_bytes(
+        _zip_payload({"a.csv": b"id\n1\n", "b.csv": b"id\n2\n"})
     )
     client = FakeClient()
 

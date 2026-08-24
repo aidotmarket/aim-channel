@@ -6,11 +6,11 @@
   "fixture_digests": {
     "hostile_d6.json": "b6aa1a62fc49284b7cf5235cafcaaaeb33260dbec00265d28a14e2a83e431b6e",
     "hostile_reports.json": "391b3a6723147ddcb10f102ac4d7435e6d5bba7527091de196a187d43455777b",
-    "report.json": "a586f3530e26f2d8bbed327890880d2bfa3be2f37833b05c286685fbc8ab9be0",
+    "report.json": "3dfe1656a8c7550b66de6dbe5f215f93018056029d9431a053300f1176c49ba3",
     "scan_spec.json": "2c4b12888349812d30993e3587352debd873da736030317147f31439e7e2b1b4"
   },
   "backend_fixture_public_key_pem_base64": "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFzQ2NJc1JNa2lMekw5NThvbmJPaApWeXpJR2poSDNQR05ybVNlTVRQRnlicUxSREQzazY4MjR5ajJBcWliUll2RHFWWTV2NnZrZGRxRS95NU5lcXB4ClFuVGRsNEc4UXVqaEQ2MWpLSXI2K2FJNXFGUFo2dTYrODBVTTY5QWhXQzloUm5Well3WE4yai9seUpGMnRnNXQKK1lyTUc0WExpZWF1Tk50REpCSHRzcWVuTjNEbE8yNFZyaWU0YUcyQ2FWQzMxdUJJTWo4eFo2Qm92UlNmVzFBSQprb0cvV1JBb0hycXdOVFZqK0FpSytGOFMxcmZHdmJVNUlNMlBSVGYwaFFFREFyRkRVd293ZkJlNFRVczV2SXhuCm5JUnJGYXNYZWFaSEw3bVlBa2hTejBScm9UVHZzYjQrZkpRMjY3RDRma292NGFvZVlYNktkSnZ0RkN5TnRaa2kKcHdJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==",
-  "backend_fixture_receipt_integrity_sha256": "809d6e01f9a86080c36396c3bfe1808ab2b7343a6bb76d077f508169ea236693",
+  "backend_fixture_receipt_integrity_sha256": "888b9c696c1513013f3f6070eacffae8cc501e143584f75c6dda64aae434030f",
   "canonicalization_vectors": [
     {"name": "floats", "input_json": "{\"value\":1.25}", "expected_utf8": "{\"value\":1.25}"},
     {"name": "integer_valued_floats", "input_json": "{\"value\":1.0}", "expected_utf8": "{\"value\":1.0}"},

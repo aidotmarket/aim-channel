@@ -53,7 +53,7 @@
   "payment_disclosure_version": "payment-disclosure-v1",
   "preview_requested": true,
   "quote_id": "quote_0000000000000001",
-  "receipt_signature": "ySikxvfcakR74wJErnc4moZ/256WQ1E1GRmi3eOe1eON3932vKgwtjugXE5rYhj/gmjYXY65WF/zxbJ1S7uHDw==",
+  "receipt_signature": "FH/3P5IPYHJ38VztPNljWOeyLkr0x9qbCkLegcLLZYmUqRRL1WjiAMBojieXXBnfu993AcC+6+GvL5kX7ZN+Bg==",
   "requested_action": "start",
   "row_count_algorithm_version": "exact-v1",
   "signature_algorithm": "Ed25519",

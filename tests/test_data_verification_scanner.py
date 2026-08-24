@@ -463,6 +463,10 @@ def test_folded_fixture_digests_and_canonicalization_match_backend_contract():
     )
     report = json.loads((FIXTURES / "report.json").read_text())
     assert set(report) == REPORT_FIELD_CONTRACT
+    INSTALL_PRIVATE_KEY.public_key().verify(
+        base64.b64decode(report["receipt_signature"]),
+        canonical_json_bytes(receipt_signature_binding(report)),
+    )
     receipt_integrity = (
         canonical_json_bytes(receipt_signature_binding(report))
         + b"\0"

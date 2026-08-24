@@ -25,6 +25,8 @@ APPROVED_COLUMN_TYPES = frozenset(
     {"string", "integer", "float", "decimal", "boolean", "date", "datetime", "binary", "unknown"}
 )
 MAX_COLUMN_NAME_LENGTH = 256
+RATE_SCALE = 1_000_000
+HLL_RELATIVE_ERROR_PPM = 91_924
 
 
 class UnsupportedConnectorShape(ValueError):
@@ -193,6 +195,67 @@ def _has_low_occupancy(counts: Iterable[int], minimum_aggregate_occupancy: int) 
     return any(0 < count < minimum_aggregate_occupancy for count in counts)
 
 
+def _rounded_rate_units(count: int, row_count: int) -> int:
+    """Round count / row_count to six decimals with exact half-even ties."""
+    quotient, remainder = divmod(count * RATE_SCALE, row_count)
+    if remainder * 2 > row_count or (remainder * 2 == row_count and quotient % 2):
+        quotient += 1
+    return quotient
+
+
+def _format_null_rate(count: int, row_count: int) -> str:
+    units = _rounded_rate_units(count, row_count)
+    return f"{units // RATE_SCALE}.{units % RATE_SCALE:06d}"
+
+
+def _null_rate_preimage_range(formatted_rate: str, row_count: int) -> tuple[int, int]:
+    """Return all integer counts that half-even serialize to formatted_rate."""
+    whole, fractional = formatted_rate.split(".")
+    target = int(whole) * RATE_SCALE + int(fractional)
+
+    def first_count_at_least(units: int) -> int:
+        low, high = 0, row_count + 1
+        while low < high:
+            middle = (low + high) // 2
+            if _rounded_rate_units(middle, row_count) < units:
+                low = middle + 1
+            else:
+                high = middle
+        return low
+
+    first = first_count_at_least(target)
+    last = first_count_at_least(target + 1) - 1
+    if first > row_count or first > last or _rounded_rate_units(first, row_count) != target:
+        raise ValueError("formatted null rate has no integer preimage")
+    return first, last
+
+
+def _null_rate_has_ambiguous_sparse_support(
+    formatted_rate: str,
+    row_count: int,
+    minimum_aggregate_occupancy: int,
+) -> bool:
+    first, last = _null_rate_preimage_range(formatted_rate, row_count)
+    sparse_high = minimum_aggregate_occupancy - 1
+    sparse_null = max(first, 1) <= min(last, sparse_high)
+    sparse_non_null = max(first, row_count - sparse_high) <= min(last, row_count - 1)
+    return sparse_null or sparse_non_null
+
+
+def _approx_distinct_has_ambiguous_sparse_support(
+    estimate: int,
+    relative_error_ppm: int,
+    minimum_aggregate_occupancy: int,
+) -> bool:
+    if estimate == 0:
+        return False
+    lower_numerator = estimate * (RATE_SCALE - relative_error_ppm)
+    upper_numerator = estimate * (RATE_SCALE + relative_error_ppm)
+    first_integer = max(1, -(-lower_numerator // RATE_SCALE))
+    last_integer = min(minimum_aggregate_occupancy - 1, upper_numerator // RATE_SCALE)
+    return first_integer <= last_integer
+
+
 def object_commitment(commitment_key: bytes, source_binding: bytes, identity: str) -> str:
     """Return the customer-keyed identifier transmitted for one structural object."""
     return hmac.new(
@@ -242,20 +305,39 @@ class EolympConnectorV1:
                 low_population = table.num_rows < minimum_aggregate_occupancy
 
                 null_support = (column.null_count, table.num_rows - column.null_count)
-                if low_population or _has_low_occupancy(null_support, minimum_aggregate_occupancy):
+                formatted_null_rate = (
+                    None if low_population else _format_null_rate(column.null_count, table.num_rows)
+                )
+                if (
+                    low_population
+                    or _has_low_occupancy(null_support, minimum_aggregate_occupancy)
+                    or _null_rate_has_ambiguous_sparse_support(
+                        formatted_null_rate,
+                        table.num_rows,
+                        minimum_aggregate_occupancy,
+                    )
+                ):
                     null_rates.append(SUPPRESSED)
                 else:
-                    null_rates.append(f"{column.null_count / table.num_rows:.6f}")
+                    null_rates.append(formatted_null_rate)
 
                 if low_population or 0 < local_exact_distinct < minimum_aggregate_occupancy:
                     distinct_counts.append(SUPPRESSED)
                 else:
+                    estimate = _hll_estimate(values, seed + index.to_bytes(4, "big"))
+                    estimate_value = {
+                        "estimate": estimate,
+                        "algorithm": "hll-sha256-v1",
+                        "relative_error_ppm": HLL_RELATIVE_ERROR_PPM,
+                    }
                     distinct_counts.append(
-                        {
-                            "estimate": _hll_estimate(values, seed + index.to_bytes(4, "big")),
-                            "algorithm": "hll-sha256-v1",
-                            "relative_error_ppm": 91924,
-                        }
+                        SUPPRESSED
+                        if _approx_distinct_has_ambiguous_sparse_support(
+                            estimate,
+                            HLL_RELATIVE_ERROR_PPM,
+                            minimum_aggregate_occupancy,
+                        )
+                        else estimate_value
                     )
 
                 if column_types[index] in {"string", "binary"}:

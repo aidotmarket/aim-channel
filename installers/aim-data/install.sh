@@ -15,7 +15,7 @@ die()  { echo -e "\n  ${RED}✘${NC} $*\n"; exit 1; }
 
 REPO_RAW="https://raw.githubusercontent.com/aidotmarket/aim-data/main"
 COMPOSE_URL="${REPO_RAW}/docker-compose.aim-data.yml"
-IMAGE="ghcr.io/aidotmarket/aim-data:${AIM_DATA_VERSION:-v1.22.5}"
+IMAGE="ghcr.io/aidotmarket/aim-data:${AIM_DATA_VERSION:-v1.22.6}"
 INSTALL_DIR="${AIM_DATA_INSTALL_DIR:-$HOME/aim-data}"
 COMPOSE_FILE="docker-compose.aim-data.yml"
 

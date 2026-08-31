@@ -88,7 +88,7 @@ def _disclosure_body(**overrides):
             "description": "Buyer-facing spend data.",
             "category": "retail",
             "tags": ["customers"],
-            "schema": [{"name": "segment", "type": "string"}],
+            "schema": {"columns": [{"name": "segment", "type": "string"}]},
             "data_format": "csv",
             "source_row_count": 10,
             "source_column_count": 1,
@@ -707,6 +707,9 @@ async def test_disclosure_snapshot_proxy_forwards_seller_bearer_not_vz_jwt(monke
     assert capture["url"] == "https://ai.market.test/api/v1/listings/listing-1/disclosure-snapshots"
     assert capture["kwargs"]["headers"]["Authorization"] == "Bearer seller-token"
     assert "publish_listing" not in capture["kwargs"]["headers"]["Authorization"]
+    assert capture["kwargs"]["json"]["approved_fields"]["schema"] == {
+        "columns": [{"name": "segment", "type": "string"}]
+    }
 
 
 @pytest.mark.asyncio

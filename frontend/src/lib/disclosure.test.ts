@@ -1,11 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AIM_CHANNEL_DISCLOSURE_CONFIRMATION_COPY,
   buildApprovedMetadataDraft,
   buildDisclosureSnapshotPayload,
   prepareDisclosureSample,
 } from "./disclosure";
-import type { ApiDataset, DatasetListingMetadata } from "./api";
+import {
+  DisclosureSnapshotRequestError,
+  marketplaceApi,
+  type ApiDataset,
+  type DatasetListingMetadata,
+} from "./api";
 import type { ListingEditorValue } from "@/components/ListingEditorForm";
 
 const form: ListingEditorValue = {
@@ -44,6 +49,44 @@ const dataset = {
   metadata: { row_count: 500, column_count: 2, size_bytes: 1024, columns: [] },
 } as ApiDataset;
 
+const expectedApprovedFields = {
+  title: "Customer Spend",
+  description: "Buyer-facing spend data.",
+  category: "retail",
+  tags: ["customers", "spend"],
+  schema: {
+    columns: [
+      { name: "segment", type: "string", null_percentage: 0, uniqueness_ratio: 0.5 },
+      { name: "spend", type: "float", null_percentage: 0, uniqueness_ratio: 0.9 },
+    ],
+  },
+  data_format: "csv",
+  source_row_count: 500,
+  source_column_count: 2,
+  compliance_summary: {
+    privacy_score: 9,
+    freshness_score: 0.8,
+    data_categories: ["retail"],
+  },
+  source_delivery_public_metadata: {
+    file_format: "csv",
+    size_bytes: 1024,
+  },
+};
+
+beforeEach(() => {
+  vi.stubGlobal("localStorage", {
+    getItem: vi.fn(() => null),
+    setItem: vi.fn(),
+    removeItem: vi.fn(),
+  });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
 describe("disclosure payload builder", () => {
   it("maps approved metadata to approved_fields", () => {
     const approved = buildApprovedMetadataDraft(form, metadata, dataset);
@@ -63,7 +106,7 @@ describe("disclosure payload builder", () => {
     ]);
   });
 
-  it("maps sample decision none to approved_sample null", () => {
+  it("serializes the exact no-sample request with schema.columns", async () => {
     const payload = buildDisclosureSnapshotPayload({
       approvedFields: buildApprovedMetadataDraft(form, metadata, dataset),
       sampleDecision: "none",
@@ -71,12 +114,26 @@ describe("disclosure payload builder", () => {
       confirmed: true,
       sourcePublishOperationId: "op-1",
     });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: vi.fn().mockResolvedValue({ status: "complete", listing_id: "listing-1" }),
+    } as unknown as Response);
 
-    expect(payload.sample_decision).toBe("none");
-    expect(payload.approved_sample).toBeNull();
-    expect(payload.approval_source).toBe("aim_channel");
-    expect(payload.ai_training_notification_ack).toBe(true);
-    expect(payload.ai_training_notification_text).toBe(AIM_CHANNEL_DISCLOSURE_CONFIRMATION_COPY);
+    await marketplaceApi.createDisclosureSnapshot("listing-1", { dataset_id: dataset.id, ...payload });
+
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toEqual({
+      dataset_id: "ds-1",
+      approved_fields: expectedApprovedFields,
+      sample_decision: "none",
+      approved_sample: null,
+      ai_training_notification_ack: true,
+      ai_training_notification_text: AIM_CHANNEL_DISCLOSURE_CONFIRMATION_COPY,
+      license: "standard_marketplace",
+      approval_source: "aim_channel",
+      source_publish_operation_id: "op-1",
+    });
   });
 
   it("approved_rows includes only displayed columns and rows with deterministic refs", () => {
@@ -93,6 +150,72 @@ describe("disclosure payload builder", () => {
         { a: 2, b: "y", hidden: "not-hidden-until-column-truncation" },
       ],
     });
+  });
+
+  it("serializes the exact approved-row request without changing the sample", async () => {
+    const approvedSample = prepareDisclosureSample([
+      { segment: "enterprise", spend: 125 },
+      { segment: "consumer", spend: 75 },
+    ]).sample;
+    const payload = buildDisclosureSnapshotPayload({
+      approvedFields: buildApprovedMetadataDraft(form, metadata, dataset),
+      sampleDecision: "approved_rows",
+      approvedSample,
+      confirmed: true,
+      sourcePublishOperationId: "op-2",
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: vi.fn().mockResolvedValue({ status: "complete", listing_id: "listing-1" }),
+    } as unknown as Response);
+
+    await marketplaceApi.createDisclosureSnapshot("listing-1", { dataset_id: dataset.id, ...payload });
+
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toEqual({
+      dataset_id: "ds-1",
+      approved_fields: expectedApprovedFields,
+      sample_decision: "approved_rows",
+      approved_sample: {
+        columns: ["segment", "spend"],
+        row_refs: ["preview:0", "preview:1"],
+        rows: [
+          { segment: "enterprise", spend: 125 },
+          { segment: "consumer", spend: 75 },
+        ],
+      },
+      ai_training_notification_ack: true,
+      ai_training_notification_text: AIM_CHANNEL_DISCLOSURE_CONFIRMATION_COPY,
+      license: "standard_marketplace",
+      approval_source: "aim_channel",
+      source_publish_operation_id: "op-2",
+    });
+  });
+
+  it("surfaces a deterministic 422 as a plain-English rejection", async () => {
+    const payload = buildDisclosureSnapshotPayload({
+      approvedFields: buildApprovedMetadataDraft(form, metadata, dataset),
+      sampleDecision: "none",
+      approvedSample: null,
+      confirmed: true,
+      sourcePublishOperationId: "op-1",
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false,
+      status: 422,
+      json: vi.fn().mockResolvedValue({
+        detail: [{ msg: "Input should be a valid dictionary" }],
+      }),
+    } as unknown as Response);
+
+    const request = marketplaceApi.createDisclosureSnapshot("listing-1", { dataset_id: dataset.id, ...payload });
+
+    await expect(request).rejects.toEqual(expect.objectContaining<Partial<DisclosureSnapshotRequestError>>({
+      name: "DisclosureSnapshotRequestError",
+      status: 422,
+      message: "ai.market rejected the disclosure snapshot because its data is invalid: Input should be a valid dictionary",
+    }));
   });
 
   it("truncates over 100 rows and over 25 columns before submit", () => {

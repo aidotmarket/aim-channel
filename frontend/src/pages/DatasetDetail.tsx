@@ -58,6 +58,7 @@ import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   datasetsApi,
+  DisclosureSnapshotRequestError,
   marketplaceApi,
   piiApi,
   type ApiDataset,
@@ -101,6 +102,41 @@ import {
   type DisclosureSnapshotPayload,
   type PreparedDisclosureSample,
 } from "@/lib/disclosure";
+
+type DisclosurePublishStatus =
+  | "idle"
+  | "publish_failed"
+  | "snapshot_pending"
+  | "snapshot_rejected"
+  | "disclosure_unknown"
+  | "complete";
+
+function disclosureFailure(error: unknown): {
+  status: Extract<DisclosurePublishStatus, "snapshot_pending" | "snapshot_rejected" | "disclosure_unknown">;
+  title: string;
+  description: string;
+} {
+  const message = error instanceof Error ? error.message : "";
+  if (error instanceof DisclosureSnapshotRequestError && error.status === 422) {
+    return {
+      status: "snapshot_rejected",
+      title: "Disclosure snapshot rejected",
+      description: message || "ai.market rejected the submitted disclosure data. Review the disclosure decision before trying again.",
+    };
+  }
+  if (message.toLowerCase().includes("status unknown")) {
+    return {
+      status: "disclosure_unknown",
+      title: "Disclosure status unknown",
+      description: message,
+    };
+  }
+  return {
+    status: "snapshot_pending",
+    title: "Listing published, disclosure snapshot pending",
+    description: message || "The listing exists on ai.market, but the public discovery package is not complete.",
+  };
+}
 
 const getFileIcon = (type: Dataset["type"]) => {
   switch (type) {
@@ -319,7 +355,7 @@ export function ListingPreparation({
   const [sampleLoading, setSampleLoading] = useState(false);
   const [sampleError, setSampleError] = useState<string | null>(null);
   const [finalDisclosureConfirmed, setFinalDisclosureConfirmed] = useState(false);
-  const [publishStatus, setPublishStatus] = useState<"idle" | "publish_failed" | "snapshot_pending" | "disclosure_unknown" | "complete">("idle");
+  const [publishStatus, setPublishStatus] = useState<DisclosurePublishStatus>("idle");
   const [publishedListingId, setPublishedListingId] = useState<string | null>(dataset.listing_id ?? null);
   const [retrySnapshotPayload, setRetrySnapshotPayload] = useState<DisclosureSnapshotPayload | null>(null);
 
@@ -596,9 +632,10 @@ export function ListingPreparation({
   };
 
   const submitDisclosureSnapshot = async (listingId: string, payload: DisclosureSnapshotPayload) => {
+    const request = { dataset_id: dataset.id, ...payload } satisfies DisclosureSnapshotProxyRequest;
     const response = await marketplaceApi.createDisclosureSnapshot(
       listingId,
-      { dataset_id: dataset.id, ...payload } as DisclosureSnapshotProxyRequest
+      request
     );
     setPublishedListingId(listingId);
     setRetrySnapshotPayload(null);
@@ -632,13 +669,11 @@ export function ListingPreparation({
     try {
       await submitDisclosureSnapshot(publishedListingId, retrySnapshotPayload);
     } catch (e) {
-      const message = e instanceof Error ? e.message : "";
-      setPublishStatus(message.toLowerCase().includes("status unknown") ? "disclosure_unknown" : "snapshot_pending");
+      const failure = disclosureFailure(e);
+      setPublishStatus(failure.status);
       toast({
-        title: message.toLowerCase().includes("status unknown")
-          ? "Disclosure status unknown"
-          : "Listing published, disclosure snapshot pending",
-        description: message || "Retry the disclosure snapshot before treating this listing as complete.",
+        title: failure.title,
+        description: failure.description,
         variant: "destructive",
       });
     } finally {
@@ -720,13 +755,11 @@ export function ListingPreparation({
       try {
         await submitDisclosureSnapshot(listingId, disclosurePayload);
       } catch (snapshotError) {
-        const message = snapshotError instanceof Error ? snapshotError.message : "";
-        setPublishStatus(message.toLowerCase().includes("status unknown") ? "disclosure_unknown" : "snapshot_pending");
+        const failure = disclosureFailure(snapshotError);
+        setPublishStatus(failure.status);
         toast({
-          title: message.toLowerCase().includes("status unknown")
-            ? "Disclosure status unknown"
-            : "Listing published, disclosure snapshot pending",
-          description: message || "The listing exists on ai.market, but the public discovery package is not complete.",
+          title: failure.title,
+          description: failure.description,
           variant: "destructive",
         });
       }
@@ -1231,20 +1264,28 @@ export function ListingPreparation({
               </div>
             </div>
 
-            {(publishStatus === "snapshot_pending" || publishStatus === "disclosure_unknown") && (
+            {(publishStatus === "snapshot_pending" || publishStatus === "snapshot_rejected" || publishStatus === "disclosure_unknown") && (
               <div className="rounded-md border border-yellow-500/30 bg-yellow-500/5 p-3 text-sm">
                 <h3 className="font-medium">
-                  {publishStatus === "disclosure_unknown" ? "Disclosure status unknown" : "Listing published, disclosure snapshot pending"}
+                  {publishStatus === "disclosure_unknown"
+                    ? "Disclosure status unknown"
+                    : publishStatus === "snapshot_rejected"
+                      ? "Disclosure snapshot rejected"
+                      : "Listing published, disclosure snapshot pending"}
                 </h3>
                 <p className="mt-1 text-muted-foreground">
                   {publishStatus === "disclosure_unknown"
                     ? "ai.market may have accepted the snapshot, but AIM Data could not store the local audit record."
-                    : "The listing exists on ai.market, but the public discovery package is not complete."}
+                    : publishStatus === "snapshot_rejected"
+                      ? "ai.market rejected the submitted disclosure data. Review the disclosure decision before trying again."
+                      : "The listing exists on ai.market, but the public discovery package is not complete."}
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <Button type="button" size="sm" onClick={handleRetryDisclosureSnapshot} disabled={publishing || !retrySnapshotPayload}>
-                    Retry disclosure snapshot
-                  </Button>
+                  {publishStatus !== "snapshot_rejected" && (
+                    <Button type="button" size="sm" onClick={handleRetryDisclosureSnapshot} disabled={publishing || !retrySnapshotPayload}>
+                      Retry disclosure snapshot
+                    </Button>
+                  )}
                   <Button type="button" size="sm" variant="outline" onClick={handleReviewDisclosureDecision} disabled={publishing}>
                     Review disclosure decision
                   </Button>

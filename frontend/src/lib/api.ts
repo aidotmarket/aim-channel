@@ -1,5 +1,6 @@
 // API Configuration and Client
 import { getActiveBrand } from "@/lib/brandConfig";
+import { formatErrorDetail } from "@/lib/format-error";
 
 // Get API URL from localStorage or environment variable or default.
 // Default is empty string (same-origin relative URLs) so the frontend
@@ -565,9 +566,31 @@ export interface MarketplacePublishResponse {
   error?: string | null;
 }
 
+export interface DisclosureApprovedColumn {
+  name: string;
+  type?: string | null;
+  null_percentage?: number | null;
+  uniqueness_ratio?: number | null;
+}
+
+export interface DisclosureApprovedFields {
+  title: string;
+  description: string;
+  category: string;
+  tags: string[];
+  schema: {
+    columns: DisclosureApprovedColumn[];
+  };
+  data_format: string | null;
+  source_row_count: number | null;
+  source_column_count: number | null;
+  compliance_summary: Record<string, unknown>;
+  source_delivery_public_metadata: Record<string, unknown>;
+}
+
 export interface DisclosureSnapshotProxyRequest {
   dataset_id: string;
-  approved_fields: Record<string, unknown>;
+  approved_fields: DisclosureApprovedFields;
   sample_decision: 'none' | 'approved_rows';
   approved_sample: {
     columns: string[];
@@ -586,6 +609,13 @@ export interface DisclosureSnapshotProxyResponse {
   listing_id: string;
   disclosure_version?: string | null;
   [key: string]: unknown;
+}
+
+export class DisclosureSnapshotRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'DisclosureSnapshotRequestError';
+  }
 }
 
 // BQ-108: Batch upload types
@@ -1026,14 +1056,20 @@ export const marketplaceApi = {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: 'Disclosure snapshot failed' })) as {
-        detail?: string;
+        detail?: unknown;
         error?: {
           safe_message?: string;
           title?: string;
         };
       };
-      const message = error.detail || error.error?.safe_message || error.error?.title || `Disclosure snapshot failed: ${response.status}`;
-      throw new Error(message);
+      const detail = formatErrorDetail(
+        error.detail ?? error.error?.safe_message ?? error.error?.title,
+        `Disclosure snapshot failed: ${response.status}`
+      );
+      const message = response.status === 422
+        ? `ai.market rejected the disclosure snapshot because its data is invalid: ${detail}`
+        : detail;
+      throw new DisclosureSnapshotRequestError(message, response.status);
     }
 
     return response.json();

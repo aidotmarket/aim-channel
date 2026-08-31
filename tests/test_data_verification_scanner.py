@@ -1,12 +1,17 @@
 import base64
 import hashlib
+import hmac
+import io
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 import httpx
+import pyarrow as pa
+import pyarrow.parquet as pq
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -18,7 +23,17 @@ from app.models.s3_connection import S3Connection
 from app.models.s3_object_metadata import S3ObjectMetadata
 from app.models.s3_scan_job import S3ScanJob
 from app.services import source_artifact_resolver as resolver
-from app.services.data_verification.contract import ContractError, REPORT_FIELD_CONTRACT
+from app.services.data_verification.contract import (
+    ContractError,
+    REPORT_FIELD_CONTRACT,
+    assert_report_field_contract,
+)
+from app.services.data_verification import scanner as scanner_module
+from app.services.data_verification.connectors import eolymp_v1
+from app.services.data_verification.connectors.eolymp_v1 import (
+    APPROVED_COLUMN_TYPES,
+    EolympConnectorV1,
+)
 from app.services.data_verification.scanner import (
     DataVerificationScanner,
     ScanRefusedError,
@@ -99,6 +114,110 @@ def _local_dataset(tmp_path, monkeypatch, payload: bytes, suffix="csv"):
     return listing_id, dataset_id
 
 
+def _parquet_payload(columns: dict[str, pa.Array]) -> bytes:
+    stream = io.BytesIO()
+    pq.write_table(pa.table(columns), stream)
+    return stream.getvalue()
+
+
+def _connector_facts(payload: bytes, *, minimum_aggregate_occupancy: int):
+    return EolympConnectorV1().scan_bytes(
+        artifact_name="fixture.parquet",
+        payload=payload,
+        commitment_key=COMMITMENT_KEY,
+        source_binding=b"dataset-s1590-fixture",
+        deterministic_seed="00" * 32,
+        minimum_aggregate_occupancy=minimum_aggregate_occupancy,
+        length_bounds=(0, 1, 4, 8, 16, 32, 64, 128, 256),
+        numeric_boundaries=(-1000.0, -100.0, -10.0, 0.0, 10.0, 100.0, 1000.0),
+        max_inference_input_tokens=8192,
+        preview_requested=True,
+    )["objects"][0]
+
+
+@pytest.mark.parametrize(
+    ("threshold", "estimate", "suppressed"),
+    [
+        (3, 0, False),
+        (3, 1, True),
+        (3, 2, True),
+        (3, 3, False),
+        (10, 0, False),
+        (10, 9, True),
+        (10, 10, False),
+        (10, 11, False),
+    ],
+)
+def test_approx_distinct_emitter_rejects_ambiguous_integer_support(
+    monkeypatch, threshold, estimate, suppressed
+):
+    payload = _parquet_payload({"value": pa.array(range(20), type=pa.int64())})
+    monkeypatch.setattr(eolymp_v1, "_hll_estimate", lambda *_args: estimate)
+
+    value = _connector_facts(
+        payload, minimum_aggregate_occupancy=threshold
+    )["approx_distinct_count"][0]
+
+    if suppressed:
+        assert value == "suppressed_low_occupancy"
+    else:
+        assert value["estimate"] == estimate
+
+
+@pytest.mark.parametrize(
+    ("threshold", "row_count", "null_count", "suppressed"),
+    [
+        (3, 20, 1, True),
+        (10, 20, 1, True),
+        (3, 20, 19, True),
+        (10, 20, 19, True),
+        (3, 6, 3, False),
+        (10, 20, 10, False),
+        (3, 12, 0, False),
+        (10, 12, 0, False),
+        (3, 12, 12, False),
+        (10, 12, 12, False),
+    ],
+)
+def test_null_rate_emitter_rejects_ambiguous_formatter_preimages(
+    threshold, row_count, null_count, suppressed
+):
+    values = [None] * null_count + list(range(row_count - null_count))
+    payload = _parquet_payload({"value": pa.array(values, type=pa.int64())})
+
+    value = _connector_facts(
+        payload, minimum_aggregate_occupancy=threshold
+    )["null_rate"][0]
+
+    assert (value == "suppressed_low_occupancy") is suppressed
+    if not suppressed:
+        assert value == eolymp_v1._format_null_rate(null_count, row_count)
+
+
+@pytest.mark.parametrize("threshold", [3, 10])
+def test_null_rate_large_endpoint_preimages_include_sparse_support(threshold):
+    row_count = 15_000_000
+
+    assert eolymp_v1._format_null_rate(0, row_count) == "0.000000"
+    assert eolymp_v1._null_rate_preimage_range("0.000000", row_count) == (0, 7)
+    assert eolymp_v1._null_rate_has_ambiguous_sparse_support(
+        "0.000000", row_count, threshold
+    )
+    assert eolymp_v1._format_null_rate(row_count, row_count) == "1.000000"
+    assert eolymp_v1._null_rate_preimage_range("1.000000", row_count) == (
+        row_count - 7,
+        row_count,
+    )
+    assert eolymp_v1._null_rate_has_ambiguous_sparse_support(
+        "1.000000", row_count, threshold
+    )
+
+
+def test_null_rate_formatter_uses_exact_half_even_ties():
+    assert eolymp_v1._format_null_rate(1, 2_000_000) == "0.000000"
+    assert eolymp_v1._format_null_rate(3, 2_000_000) == "0.000002"
+
+
 def test_signed_spec_binds_complete_contract_and_rejects_tamper(tmp_path, monkeypatch):
     listing_id, dataset_id = _local_dataset(tmp_path, monkeypatch, b"id\n1\n")
     spec = _signed_spec(listing_id=listing_id, source_handle_id=dataset_id)
@@ -130,9 +249,120 @@ def test_one_two_and_low_cardinality_aggregates_are_suppressed(tmp_path, monkeyp
     for field in ("null_rate", "approx_distinct_count", "length_histograms", "numeric_range_buckets"):
         values = result.report["objects"][0][field]
         if payload.count(b"\n") <= 3:
-            assert values == ["suppressed_low_occupancy"] * len(values)
+            column_types = result.report["objects"][0]["column_types"]
+            for column_type, value in zip(column_types, values):
+                if field == "length_histograms" and column_type not in {"string", "binary"}:
+                    assert value is None
+                elif field == "numeric_range_buckets" and column_type not in {
+                    "integer",
+                    "float",
+                    "decimal",
+                }:
+                    assert value is None
+                else:
+                    assert value == "suppressed_low_occupancy"
         else:
-            assert values[1] == "suppressed_low_occupancy"
+            if field == "approx_distinct_count":
+                assert values[1] == "suppressed_low_occupancy"
+            elif field == "null_rate":
+                assert values[1] == "0.000000"
+            elif field == "length_histograms":
+                assert all(count == 0 or count >= 10 for count in values[1])
+            else:
+                assert values[1] is None
+
+
+def test_sparse_categories_and_buckets_suppress_each_whole_aggregate(tmp_path, monkeypatch):
+    payload = _parquet_payload(
+        {
+            "sparse_null": pa.array([None] + [f"v{i:02d}" for i in range(1, 20)]),
+            "sparse_length": pa.array([f"v{i:02d}" for i in range(19)] + ["x" * 50]),
+            "sparse_numeric": pa.array(list(range(10, 29)) + [10_000], type=pa.int64()),
+        }
+    )
+    listing_id, dataset_id = _local_dataset(tmp_path, monkeypatch, payload, suffix="parquet")
+    result = _scanner().scan(
+        signed_spec=_signed_spec(listing_id=listing_id, source_handle_id=dataset_id),
+        d6_candidate=VALID_D6,
+        now=FIXED_NOW,
+    )
+    facts = result.report["objects"][0]
+
+    assert facts["null_rate"][0] == "suppressed_low_occupancy"
+    assert facts["approx_distinct_count"][0] != "suppressed_low_occupancy"
+    assert facts["length_histograms"][0] != "suppressed_low_occupancy"
+    assert all(count == 0 or count >= 10 for count in facts["length_histograms"][0])
+
+    assert facts["null_rate"][1] == "0.000000"
+    assert facts["approx_distinct_count"][1] != "suppressed_low_occupancy"
+    assert facts["length_histograms"][1] == "suppressed_low_occupancy"
+
+    assert facts["null_rate"][2] == "0.000000"
+    assert facts["approx_distinct_count"][2] != "suppressed_low_occupancy"
+    assert facts["numeric_range_buckets"][2] == "suppressed_low_occupancy"
+
+
+def _all_approved_types_payload() -> bytes:
+    rows = range(20)
+    return _parquet_payload(
+        {
+            "string_col": pa.array([f"value-{i}" for i in rows], type=pa.string()),
+            "integer_col": pa.array(rows, type=pa.int64()),
+            "float_col": pa.array([i + 0.5 for i in rows], type=pa.float64()),
+            "decimal_col": pa.array([Decimal(f"{i}.25") for i in rows], type=pa.decimal128(8, 2)),
+            "boolean_col": pa.array([i % 2 == 0 for i in rows], type=pa.bool_()),
+            "date_col": pa.array([date(2026, 1, 1) + timedelta(days=i) for i in rows], type=pa.date32()),
+            "datetime_col": pa.array(
+                [datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(hours=i) for i in rows],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+            "binary_col": pa.array([f"bytes-{i}".encode() for i in rows], type=pa.binary()),
+            "unknown_col": pa.nulls(20),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("column_name", "expected_type"),
+    [
+        ("string_col", "string"),
+        ("integer_col", "integer"),
+        ("float_col", "float"),
+        ("decimal_col", "decimal"),
+        ("boolean_col", "boolean"),
+        ("date_col", "date"),
+        ("datetime_col", "datetime"),
+        ("binary_col", "binary"),
+        ("unknown_col", "unknown"),
+    ],
+)
+def test_scanner_report_maps_every_approved_column_type_and_matches_contract(
+    tmp_path, monkeypatch, column_name, expected_type
+):
+    payload = _all_approved_types_payload()
+    listing_id, dataset_id = _local_dataset(tmp_path, monkeypatch, payload, suffix="parquet")
+    result = _scanner().scan(
+        signed_spec=_signed_spec(listing_id=listing_id, source_handle_id=dataset_id),
+        d6_candidate=VALID_D6,
+        now=FIXED_NOW,
+    )
+
+    assert_report_field_contract(result.report)
+    facts = result.report["objects"][0]
+    column_types = facts["column_types"]
+    assert column_types == [
+        "string",
+        "integer",
+        "float",
+        "decimal",
+        "boolean",
+        "date",
+        "datetime",
+        "binary",
+        "unknown",
+    ]
+    assert set(column_types) == APPROVED_COLUMN_TYPES
+    assert column_types[facts["column_names"].index(column_name)] == expected_type
 
 
 def test_deterministic_local_scan_has_byte_identical_facts_and_valid_receipt(tmp_path, monkeypatch):
@@ -315,7 +545,57 @@ def test_unsupported_shape_and_budget_refuse_instead_of_partial_report(tmp_path,
         _scanner().scan(signed_spec=spec, d6_candidate=VALID_D6, now=FIXED_NOW)
 
 
-def test_folded_fixture_digests_and_canonicalization_match_backend_contract():
+def _regenerated_fixture_report(tmp_path, monkeypatch):
+    payload = b"problem_id,difficulty,accepted_count\n" + b"\n".join(
+        f"{index},level_{index},{index * 10}".encode() for index in range(1, 13)
+    ) + b"\n"
+    source_path = tmp_path / "fixture.csv"
+    source_path.write_bytes(payload)
+    expected_locator = b"local\x00/fixture/registered.csv"
+
+    class FixtureArtifact:
+        listing_id = "11111111-1111-4111-8111-111111111111"
+        source_handle_id = "dataset-s1590-fixture"
+        kind = "local"
+        local_path = str(source_path)
+
+        @staticmethod
+        def locator_commitment(commitment_key):
+            return hmac.new(commitment_key, expected_locator, hashlib.sha256).hexdigest()
+
+    artifact = FixtureArtifact()
+    monkeypatch.setattr(scanner_module, "resolve_source_artifact", lambda _listing_id: artifact)
+    monkeypatch.setattr(scanner_module, "assert_artifact_still_pinned", lambda _artifact: None)
+    manifest = json.loads((FIXTURES / "schema_digests.json").read_text())
+    platform_key = serialization.load_pem_public_key(
+        base64.b64decode(manifest["backend_fixture_public_key_pem_base64"])
+    )
+    times = iter(
+        [
+            datetime(2026, 8, 21, 10, 5, 0, tzinfo=timezone.utc),
+            datetime(2026, 8, 21, 10, 5, 1, tzinfo=timezone.utc),
+        ]
+    )
+    fixture_scanner = DataVerificationScanner(
+        commitment_key=COMMITMENT_KEY,
+        install_private_key=INSTALL_PRIVATE_KEY,
+        install_key_id="install-fixture-key-v1",
+        platform_public_key=platform_key,
+        clock=lambda: next(times),
+    )
+    return fixture_scanner.scan(
+        signed_spec=json.loads((FIXTURES / "scan_spec.json").read_text()),
+        d6_candidate={
+            **VALID_D6,
+            "intended_use_tags": ["analysis_reporting", "research_education"],
+        },
+        now=FIXED_NOW,
+    ).report
+
+
+def test_folded_fixture_digests_and_canonicalization_match_backend_contract(
+    tmp_path, monkeypatch
+):
     manifest = json.loads((FIXTURES / "schema_digests.json").read_text())
     assert manifest["status"] == "folded_byte_identical_to_backend_3286e0726"
     assert manifest["canonicalization_version"] == "python-json-sort-compact-v1"
@@ -337,6 +617,11 @@ def test_folded_fixture_digests_and_canonicalization_match_backend_contract():
     )
     report = json.loads((FIXTURES / "report.json").read_text())
     assert set(report) == REPORT_FIELD_CONTRACT
+    assert report == _regenerated_fixture_report(tmp_path, monkeypatch)
+    INSTALL_PRIVATE_KEY.public_key().verify(
+        base64.b64decode(report["receipt_signature"]),
+        canonical_json_bytes(receipt_signature_binding(report)),
+    )
     receipt_integrity = (
         canonical_json_bytes(receipt_signature_binding(report))
         + b"\0"

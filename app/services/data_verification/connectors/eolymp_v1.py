@@ -21,6 +21,12 @@ from app.services.marketplace_action_signer import canonical_json_bytes
 
 SUPPORTED_SUFFIXES = frozenset({".csv", ".tsv", ".json", ".jsonl", ".parquet"})
 SUPPRESSED = "suppressed_low_occupancy"
+APPROVED_COLUMN_TYPES = frozenset(
+    {"string", "integer", "float", "decimal", "boolean", "date", "datetime", "binary", "unknown"}
+)
+MAX_COLUMN_NAME_LENGTH = 256
+RATE_SCALE = 1_000_000
+HLL_RELATIVE_ERROR_PPM = 91_924
 
 
 class UnsupportedConnectorShape(ValueError):
@@ -103,15 +109,41 @@ def _type_name(data_type: pa.DataType) -> str:
         return "boolean"
     if pa.types.is_integer(data_type):
         return "integer"
-    if pa.types.is_floating(data_type) or pa.types.is_decimal(data_type):
-        return "number"
-    if pa.types.is_timestamp(data_type) or pa.types.is_date(data_type) or pa.types.is_time(data_type):
-        return "timestamp"
-    if pa.types.is_binary(data_type) or pa.types.is_large_binary(data_type):
+    if pa.types.is_floating(data_type):
+        return "float"
+    if pa.types.is_decimal(data_type):
+        return "decimal"
+    if pa.types.is_timestamp(data_type):
+        return "datetime"
+    if pa.types.is_date(data_type):
+        return "date"
+    if (
+        pa.types.is_binary(data_type)
+        or pa.types.is_large_binary(data_type)
+        or pa.types.is_fixed_size_binary(data_type)
+    ):
         return "binary"
     if pa.types.is_null(data_type):
-        return "null"
-    return "string"
+        return "unknown"
+    if pa.types.is_string(data_type) or pa.types.is_large_string(data_type):
+        return "string"
+    raise UnsupportedConnectorShape("artifact column type is unsupported")
+
+
+def _validated_column_types(table: pa.Table) -> list[str]:
+    if any(len(name) > MAX_COLUMN_NAME_LENGTH for name in table.column_names):
+        raise UnsupportedConnectorShape("artifact column name exceeds 256 characters")
+    column_types = [_type_name(field.type) for field in table.schema]
+    if any(column_type not in APPROVED_COLUMN_TYPES for column_type in column_types):
+        raise UnsupportedConnectorShape("artifact column type is unsupported")
+    return column_types
+
+
+def validate_artifact_schema(artifact_name: str, payload: bytes) -> None:
+    """Reject unsupported Arrow types and column names before a local quote request."""
+    for identity, object_payload in _objects(artifact_name, payload):
+        table = _read_table(identity if identity != "registered-root" else artifact_name, object_payload)
+        _validated_column_types(table)
 
 
 def _canonical_local_value(value: Any) -> bytes:
@@ -159,6 +191,80 @@ def _numeric_buckets(values: list[Any], boundaries: tuple[float, ...]) -> list[i
     return counts
 
 
+def _has_low_occupancy(counts: Iterable[int], minimum_aggregate_occupancy: int) -> bool:
+    return any(0 < count < minimum_aggregate_occupancy for count in counts)
+
+
+def _rounded_rate_units(count: int, row_count: int) -> int:
+    """Round count / row_count to six decimals with exact half-even ties."""
+    quotient, remainder = divmod(count * RATE_SCALE, row_count)
+    if remainder * 2 > row_count or (remainder * 2 == row_count and quotient % 2):
+        quotient += 1
+    return quotient
+
+
+def _format_null_rate(count: int, row_count: int) -> str:
+    units = _rounded_rate_units(count, row_count)
+    return f"{units // RATE_SCALE}.{units % RATE_SCALE:06d}"
+
+
+def _null_rate_preimage_range(formatted_rate: str, row_count: int) -> tuple[int, int]:
+    """Return all integer counts that half-even serialize to formatted_rate."""
+    whole, fractional = formatted_rate.split(".")
+    target = int(whole) * RATE_SCALE + int(fractional)
+
+    def first_count_at_least(units: int) -> int:
+        low, high = 0, row_count + 1
+        while low < high:
+            middle = (low + high) // 2
+            if _rounded_rate_units(middle, row_count) < units:
+                low = middle + 1
+            else:
+                high = middle
+        return low
+
+    first = first_count_at_least(target)
+    last = first_count_at_least(target + 1) - 1
+    if first > row_count or first > last or _rounded_rate_units(first, row_count) != target:
+        raise ValueError("formatted null rate has no integer preimage")
+    return first, last
+
+
+def _null_rate_has_ambiguous_sparse_support(
+    formatted_rate: str,
+    row_count: int,
+    minimum_aggregate_occupancy: int,
+) -> bool:
+    first, last = _null_rate_preimage_range(formatted_rate, row_count)
+    sparse_high = minimum_aggregate_occupancy - 1
+    sparse_null = max(first, 1) <= min(last, sparse_high)
+    sparse_non_null = max(first, row_count - sparse_high) <= min(last, row_count - 1)
+    return sparse_null or sparse_non_null
+
+
+def _approx_distinct_has_ambiguous_sparse_support(
+    estimate: int,
+    relative_error_ppm: int,
+    minimum_aggregate_occupancy: int,
+) -> bool:
+    if estimate == 0:
+        return False
+    lower_numerator = estimate * (RATE_SCALE - relative_error_ppm)
+    upper_numerator = estimate * (RATE_SCALE + relative_error_ppm)
+    first_integer = max(1, -(-lower_numerator // RATE_SCALE))
+    last_integer = min(minimum_aggregate_occupancy - 1, upper_numerator // RATE_SCALE)
+    return first_integer <= last_integer
+
+
+def object_commitment(commitment_key: bytes, source_binding: bytes, identity: str) -> str:
+    """Return the customer-keyed identifier transmitted for one structural object."""
+    return hmac.new(
+        commitment_key,
+        b"object\x00" + source_binding + b"\x00" + identity.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 class EolympConnectorV1:
     connector_type = "eolymp"
     connector_version = "eolymp-v1"
@@ -184,14 +290,10 @@ class EolympConnectorV1:
 
         for identity, object_payload in source_objects:
             table = _read_table(identity if identity != "registered-root" else artifact_name, object_payload)
-            object_id = hmac.new(
-                commitment_key,
-                b"object\x00" + source_binding + b"\x00" + identity.encode("utf-8"),
-                hashlib.sha256,
-            ).hexdigest()
+            object_id = object_commitment(commitment_key, source_binding, identity)
             column_names = list(table.column_names)
             columns = [table.column(index).combine_chunks() for index in range(table.num_columns)]
-            column_types = [_type_name(column.type) for column in columns]
+            column_types = _validated_column_types(table)
             null_rates: list[Any] = []
             distinct_counts: list[Any] = []
             length_histograms: list[Any] = []
@@ -200,32 +302,65 @@ class EolympConnectorV1:
             for index, column in enumerate(columns):
                 values = [value for value in column.to_pylist() if value is not None]
                 local_exact_distinct = len({_canonical_local_value(value) for value in values})
-                low_occupancy = (
-                    table.num_rows < minimum_aggregate_occupancy
-                    or local_exact_distinct < minimum_aggregate_occupancy
+                low_population = table.num_rows < minimum_aggregate_occupancy
+
+                null_support = (column.null_count, table.num_rows - column.null_count)
+                formatted_null_rate = (
+                    None if low_population else _format_null_rate(column.null_count, table.num_rows)
                 )
-                if low_occupancy:
+                if (
+                    low_population
+                    or _has_low_occupancy(null_support, minimum_aggregate_occupancy)
+                    or _null_rate_has_ambiguous_sparse_support(
+                        formatted_null_rate,
+                        table.num_rows,
+                        minimum_aggregate_occupancy,
+                    )
+                ):
                     null_rates.append(SUPPRESSED)
+                else:
+                    null_rates.append(formatted_null_rate)
+
+                if low_population or 0 < local_exact_distinct < minimum_aggregate_occupancy:
                     distinct_counts.append(SUPPRESSED)
-                    length_histograms.append(SUPPRESSED)
-                    numeric_buckets.append(SUPPRESSED)
-                    continue
-                null_rates.append(f"{column.null_count / table.num_rows:.6f}")
-                distinct_counts.append(
-                    {
-                        "estimate": _hll_estimate(values, seed + index.to_bytes(4, "big")),
+                else:
+                    estimate = _hll_estimate(values, seed + index.to_bytes(4, "big"))
+                    estimate_value = {
+                        "estimate": estimate,
                         "algorithm": "hll-sha256-v1",
-                        "relative_error_ppm": 91924,
+                        "relative_error_ppm": HLL_RELATIVE_ERROR_PPM,
                     }
-                )
-                length_histograms.append(
-                    _histogram(values, length_bounds) if column_types[index] in {"string", "binary"} else None
-                )
-                numeric_buckets.append(
-                    _numeric_buckets(values, numeric_boundaries)
-                    if column_types[index] in {"integer", "number"}
-                    else None
-                )
+                    distinct_counts.append(
+                        SUPPRESSED
+                        if _approx_distinct_has_ambiguous_sparse_support(
+                            estimate,
+                            HLL_RELATIVE_ERROR_PPM,
+                            minimum_aggregate_occupancy,
+                        )
+                        else estimate_value
+                    )
+
+                if column_types[index] in {"string", "binary"}:
+                    histogram = _histogram(values, length_bounds)
+                    length_histograms.append(
+                        SUPPRESSED
+                        if low_population
+                        or _has_low_occupancy(histogram, minimum_aggregate_occupancy)
+                        else histogram
+                    )
+                else:
+                    length_histograms.append(None)
+
+                if column_types[index] in {"integer", "float", "decimal"}:
+                    buckets = _numeric_buckets(values, numeric_boundaries)
+                    numeric_buckets.append(
+                        SUPPRESSED
+                        if low_population
+                        or _has_low_occupancy(buckets, minimum_aggregate_occupancy)
+                        else buckets
+                    )
+                else:
+                    numeric_buckets.append(None)
 
             fact = {
                 "object_id": object_id,

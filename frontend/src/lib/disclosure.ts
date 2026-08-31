@@ -1,4 +1,8 @@
-import type { ApiDataset, DatasetListingMetadata } from "@/lib/api";
+import type {
+  ApiDataset,
+  DatasetListingMetadata,
+  DisclosureApprovedFields,
+} from "@/lib/api";
 import type { ListingEditorValue } from "@/components/ListingEditorForm";
 
 export const AIM_CHANNEL_DISCLOSURE_CONFIRMATION_COPY =
@@ -9,23 +13,9 @@ export const AIM_CHANNEL_DISCLOSURE_APPROVAL_SOURCE = "aim_channel";
 
 export type DisclosureSampleDecision = "none" | "approved_rows";
 
-export interface ApprovedMetadataDraft {
-  title: string;
-  description: string;
-  category: string;
-  tags: string[];
-  schema: Array<{
-    name: string;
-    type?: string | null;
-    null_percentage?: number | null;
-    uniqueness_ratio?: number | null;
-  }>;
-  data_format: string | null;
-  source_row_count: number | null;
-  source_column_count: number | null;
-  compliance_summary: Record<string, unknown>;
-  source_delivery_public_metadata: Record<string, unknown>;
-}
+export type ApprovedMetadataDraft = Omit<DisclosureApprovedFields, "schema"> & {
+  schema: DisclosureApprovedFields["schema"]["columns"];
+};
 
 export interface ApprovedSample {
   columns: string[];
@@ -34,7 +24,7 @@ export interface ApprovedSample {
 }
 
 export interface DisclosureSnapshotPayload {
-  approved_fields: ApprovedMetadataDraft;
+  approved_fields: DisclosureApprovedFields;
   sample_decision: DisclosureSampleDecision;
   approved_sample: ApprovedSample | null;
   ai_training_notification_ack: boolean;
@@ -50,6 +40,44 @@ export interface PreparedDisclosureSample {
   truncatedColumns: boolean;
   truncatedForBytes: boolean;
   sizeBytes: number;
+}
+
+export type DisclosureSnapshotFailureStatus =
+  | "snapshot_pending"
+  | "snapshot_rejected"
+  | "disclosure_unknown";
+
+export interface DisclosureSnapshotFailure {
+  status: DisclosureSnapshotFailureStatus;
+  title: string;
+  description: string;
+}
+
+export function classifyDisclosureSnapshotFailure(error: unknown): DisclosureSnapshotFailure {
+  const message = error instanceof Error ? error.message : "";
+  const status = typeof error === "object" && error !== null && "status" in error
+    ? (error as { status?: unknown }).status
+    : undefined;
+
+  if (status === 422) {
+    return {
+      status: "snapshot_rejected",
+      title: "Disclosure snapshot rejected",
+      description: message || "ai.market rejected the submitted disclosure data. Review the disclosure decision before trying again.",
+    };
+  }
+  if (message.toLowerCase().includes("status unknown")) {
+    return {
+      status: "disclosure_unknown",
+      title: "Disclosure status unknown",
+      description: message,
+    };
+  }
+  return {
+    status: "snapshot_pending",
+    title: "Listing published, disclosure snapshot pending",
+    description: message || "The listing exists on ai.market, but the public discovery package is not complete.",
+  };
 }
 
 const MAX_SAMPLE_ROWS = 100;
@@ -160,7 +188,10 @@ export function buildDisclosureSnapshotPayload({
   }
 
   return {
-    approved_fields: approvedFields,
+    approved_fields: {
+      ...approvedFields,
+      schema: { columns: [...approvedFields.schema] },
+    },
     sample_decision: sampleDecision,
     approved_sample: sampleDecision === "approved_rows" ? approvedSample : null,
     ai_training_notification_ack: true,

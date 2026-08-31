@@ -58,7 +58,6 @@ import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   datasetsApi,
-  DisclosureSnapshotRequestError,
   marketplaceApi,
   piiApi,
   type ApiDataset,
@@ -95,47 +94,47 @@ import {
   AIM_CHANNEL_DISCLOSURE_CONFIRMATION_COPY,
   buildApprovedMetadataDraft,
   buildDisclosureSnapshotPayload,
+  classifyDisclosureSnapshotFailure,
   prepareDisclosureSample,
   type ApprovedMetadataDraft,
   type ApprovedSample,
+  type DisclosureSnapshotFailure,
   type DisclosureSampleDecision,
   type DisclosureSnapshotPayload,
   type PreparedDisclosureSample,
 } from "@/lib/disclosure";
 
-type DisclosurePublishStatus =
-  | "idle"
-  | "publish_failed"
-  | "snapshot_pending"
-  | "snapshot_rejected"
-  | "disclosure_unknown"
-  | "complete";
+interface DisclosureSnapshotFailurePanelProps {
+  failure: DisclosureSnapshotFailure;
+  publishing: boolean;
+  canRetry: boolean;
+  onRetry: () => void;
+  onReview: () => void;
+}
 
-function disclosureFailure(error: unknown): {
-  status: Extract<DisclosurePublishStatus, "snapshot_pending" | "snapshot_rejected" | "disclosure_unknown">;
-  title: string;
-  description: string;
-} {
-  const message = error instanceof Error ? error.message : "";
-  if (error instanceof DisclosureSnapshotRequestError && error.status === 422) {
-    return {
-      status: "snapshot_rejected",
-      title: "Disclosure snapshot rejected",
-      description: message || "ai.market rejected the submitted disclosure data. Review the disclosure decision before trying again.",
-    };
-  }
-  if (message.toLowerCase().includes("status unknown")) {
-    return {
-      status: "disclosure_unknown",
-      title: "Disclosure status unknown",
-      description: message,
-    };
-  }
-  return {
-    status: "snapshot_pending",
-    title: "Listing published, disclosure snapshot pending",
-    description: message || "The listing exists on ai.market, but the public discovery package is not complete.",
-  };
+export function DisclosureSnapshotFailurePanel({
+  failure,
+  publishing,
+  canRetry,
+  onRetry,
+  onReview,
+}: DisclosureSnapshotFailurePanelProps) {
+  return (
+    <div className="rounded-md border border-yellow-500/30 bg-yellow-500/5 p-3 text-sm">
+      <h3 className="font-medium">{failure.title}</h3>
+      <p className="mt-1 text-muted-foreground">{failure.description}</p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {failure.status !== "snapshot_rejected" && (
+          <Button type="button" size="sm" onClick={onRetry} disabled={publishing || !canRetry}>
+            Retry disclosure snapshot
+          </Button>
+        )}
+        <Button type="button" size="sm" variant="outline" onClick={onReview} disabled={publishing}>
+          Review disclosure decision
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 const getFileIcon = (type: Dataset["type"]) => {
@@ -355,7 +354,7 @@ export function ListingPreparation({
   const [sampleLoading, setSampleLoading] = useState(false);
   const [sampleError, setSampleError] = useState<string | null>(null);
   const [finalDisclosureConfirmed, setFinalDisclosureConfirmed] = useState(false);
-  const [publishStatus, setPublishStatus] = useState<DisclosurePublishStatus>("idle");
+  const [disclosureFailure, setDisclosureFailure] = useState<DisclosureSnapshotFailure | null>(null);
   const [publishedListingId, setPublishedListingId] = useState<string | null>(dataset.listing_id ?? null);
   const [retrySnapshotPayload, setRetrySnapshotPayload] = useState<DisclosureSnapshotPayload | null>(null);
 
@@ -639,7 +638,7 @@ export function ListingPreparation({
     );
     setPublishedListingId(listingId);
     setRetrySnapshotPayload(null);
-    setPublishStatus("complete");
+    setDisclosureFailure(null);
     toast({
       title: "Live on ai.market",
       description: response.disclosure_version
@@ -666,11 +665,12 @@ export function ListingPreparation({
   const handleRetryDisclosureSnapshot = async () => {
     if (!publishedListingId || !retrySnapshotPayload || publishing) return;
     setPublishing(true);
+    setDisclosureFailure(null);
     try {
       await submitDisclosureSnapshot(publishedListingId, retrySnapshotPayload);
     } catch (e) {
-      const failure = disclosureFailure(e);
-      setPublishStatus(failure.status);
+      const failure = classifyDisclosureSnapshotFailure(e);
+      setDisclosureFailure(failure);
       toast({
         title: failure.title,
         description: failure.description,
@@ -682,12 +682,13 @@ export function ListingPreparation({
   };
 
   const handleReviewDisclosureDecision = () => {
-    setPublishStatus("idle");
+    setDisclosureFailure(null);
     setFinalDisclosureConfirmed(false);
     setActiveStep(3);
   };
 
   const handlePublish = async () => {
+    setDisclosureFailure(null);
     const price = Number.parseFloat(form.priceUsd);
     if (!form.title.trim()) {
       toast({ title: "Title required", description: "Add a title for this listing.", variant: "destructive" });
@@ -716,7 +717,6 @@ export function ListingPreparation({
     }
 
     setPublishing(true);
-    setPublishStatus("idle");
     const sourcePublishOperationId = newPublishOperationId();
     let disclosurePayload: DisclosureSnapshotPayload;
     try {
@@ -747,7 +747,6 @@ export function ListingPreparation({
       });
       const listingId = publishResponse.listing_id;
       if (!listingId) {
-        setPublishStatus("publish_failed");
         throw new Error("ai.market did not return a listing_id.");
       }
       setPublishedListingId(listingId);
@@ -755,8 +754,8 @@ export function ListingPreparation({
       try {
         await submitDisclosureSnapshot(listingId, disclosurePayload);
       } catch (snapshotError) {
-        const failure = disclosureFailure(snapshotError);
-        setPublishStatus(failure.status);
+        const failure = classifyDisclosureSnapshotFailure(snapshotError);
+        setDisclosureFailure(failure);
         toast({
           title: failure.title,
           description: failure.description,
@@ -764,7 +763,6 @@ export function ListingPreparation({
         });
       }
     } catch (e) {
-      setPublishStatus("publish_failed");
       toast({
         title: "Publish failed",
         description: e instanceof Error ? e.message : "Failed to publish listing.",
@@ -1264,33 +1262,14 @@ export function ListingPreparation({
               </div>
             </div>
 
-            {(publishStatus === "snapshot_pending" || publishStatus === "snapshot_rejected" || publishStatus === "disclosure_unknown") && (
-              <div className="rounded-md border border-yellow-500/30 bg-yellow-500/5 p-3 text-sm">
-                <h3 className="font-medium">
-                  {publishStatus === "disclosure_unknown"
-                    ? "Disclosure status unknown"
-                    : publishStatus === "snapshot_rejected"
-                      ? "Disclosure snapshot rejected"
-                      : "Listing published, disclosure snapshot pending"}
-                </h3>
-                <p className="mt-1 text-muted-foreground">
-                  {publishStatus === "disclosure_unknown"
-                    ? "ai.market may have accepted the snapshot, but AIM Data could not store the local audit record."
-                    : publishStatus === "snapshot_rejected"
-                      ? "ai.market rejected the submitted disclosure data. Review the disclosure decision before trying again."
-                      : "The listing exists on ai.market, but the public discovery package is not complete."}
-                </p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {publishStatus !== "snapshot_rejected" && (
-                    <Button type="button" size="sm" onClick={handleRetryDisclosureSnapshot} disabled={publishing || !retrySnapshotPayload}>
-                      Retry disclosure snapshot
-                    </Button>
-                  )}
-                  <Button type="button" size="sm" variant="outline" onClick={handleReviewDisclosureDecision} disabled={publishing}>
-                    Review disclosure decision
-                  </Button>
-                </div>
-              </div>
+            {disclosureFailure && (
+              <DisclosureSnapshotFailurePanel
+                failure={disclosureFailure}
+                publishing={publishing}
+                canRetry={Boolean(retrySnapshotPayload)}
+                onRetry={handleRetryDisclosureSnapshot}
+                onReview={handleReviewDisclosureDecision}
+              />
             )}
 
             <div className="flex items-start gap-3 rounded-md border p-3">

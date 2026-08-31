@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { datasetsApi, piiApi, type ApiDataset, type DatasetListingMetadata, type PIIScanResponse } from "@/lib/api";
-import { ListingPreparation } from "./DatasetDetail";
+import { DisclosureSnapshotFailurePanel, ListingPreparation } from "./DatasetDetail";
 
 vi.mock("@/contexts/CoPilotContext", () => ({
   useCoPilot: () => ({
@@ -138,5 +138,39 @@ describe("seller listing preparation", () => {
     expect(screen.getByText("customers")).toBeInTheDocument();
     expect(screen.queryByText("Step 1: Privacy Review")).not.toBeInTheDocument();
     expect(generateMetadata).not.toHaveBeenCalled();
+  });
+});
+
+describe("disclosure snapshot failure panel", () => {
+  it("renders the detailed rejection beside review without offering Retry", () => {
+    const description = "ai.market rejected the disclosure snapshot because its data is invalid: Input should be a valid dictionary";
+
+    render(
+      <DisclosureSnapshotFailurePanel
+        failure={{ status: "snapshot_rejected", title: "Disclosure snapshot rejected", description }}
+        publishing={false}
+        canRetry={true}
+        onRetry={vi.fn()}
+        onReview={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText(description)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Review disclosure decision" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry disclosure snapshot" })).not.toBeInTheDocument();
+  });
+
+  it.each(["snapshot_pending", "disclosure_unknown"] as const)("offers Retry for %s", (status) => {
+    render(
+      <DisclosureSnapshotFailurePanel
+        failure={{ status, title: "Disclosure incomplete", description: "Try again safely." }}
+        publishing={false}
+        canRetry={true}
+        onRetry={vi.fn()}
+        onReview={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "Retry disclosure snapshot" })).toBeEnabled();
   });
 });

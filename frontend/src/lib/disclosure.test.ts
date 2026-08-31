@@ -3,6 +3,7 @@ import {
   AIM_CHANNEL_DISCLOSURE_CONFIRMATION_COPY,
   buildApprovedMetadataDraft,
   buildDisclosureSnapshotPayload,
+  classifyDisclosureSnapshotFailure,
   prepareDisclosureSample,
 } from "./disclosure";
 import {
@@ -216,6 +217,36 @@ describe("disclosure payload builder", () => {
       status: 422,
       message: "ai.market rejected the disclosure snapshot because its data is invalid: Input should be a valid dictionary",
     }));
+  });
+
+  it("classifies a 422 validation response as a non-retryable rejection", () => {
+    const message = "ai.market rejected the disclosure snapshot because its data is invalid: Input should be a valid dictionary";
+
+    expect(classifyDisclosureSnapshotFailure(new DisclosureSnapshotRequestError(message, 422))).toEqual({
+      status: "snapshot_rejected",
+      title: "Disclosure snapshot rejected",
+      description: message,
+    });
+  });
+
+  it.each([502, 504])("classifies HTTP %s as a pending snapshot", (status) => {
+    expect(classifyDisclosureSnapshotFailure(
+      new DisclosureSnapshotRequestError(`Disclosure snapshot failed: ${status}`, status)
+    )).toEqual({
+      status: "snapshot_pending",
+      title: "Listing published, disclosure snapshot pending",
+      description: `Disclosure snapshot failed: ${status}`,
+    });
+  });
+
+  it("classifies an indeterminate audit result as disclosure unknown", () => {
+    const message = "Disclosure snapshot status unknown after local audit persistence failed";
+
+    expect(classifyDisclosureSnapshotFailure(new Error(message))).toEqual({
+      status: "disclosure_unknown",
+      title: "Disclosure status unknown",
+      description: message,
+    });
   });
 
   it("truncates over 100 rows and over 25 columns before submit", () => {

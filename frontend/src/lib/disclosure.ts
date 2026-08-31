@@ -42,6 +42,44 @@ export interface PreparedDisclosureSample {
   sizeBytes: number;
 }
 
+export type DisclosureSnapshotFailureStatus =
+  | "snapshot_pending"
+  | "snapshot_rejected"
+  | "disclosure_unknown";
+
+export interface DisclosureSnapshotFailure {
+  status: DisclosureSnapshotFailureStatus;
+  title: string;
+  description: string;
+}
+
+export function classifyDisclosureSnapshotFailure(error: unknown): DisclosureSnapshotFailure {
+  const message = error instanceof Error ? error.message : "";
+  const status = typeof error === "object" && error !== null && "status" in error
+    ? (error as { status?: unknown }).status
+    : undefined;
+
+  if (status === 422) {
+    return {
+      status: "snapshot_rejected",
+      title: "Disclosure snapshot rejected",
+      description: message || "ai.market rejected the submitted disclosure data. Review the disclosure decision before trying again.",
+    };
+  }
+  if (message.toLowerCase().includes("status unknown")) {
+    return {
+      status: "disclosure_unknown",
+      title: "Disclosure status unknown",
+      description: message,
+    };
+  }
+  return {
+    status: "snapshot_pending",
+    title: "Listing published, disclosure snapshot pending",
+    description: message || "The listing exists on ai.market, but the public discovery package is not complete.",
+  };
+}
+
 const MAX_SAMPLE_ROWS = 100;
 const MAX_SAMPLE_COLUMNS = 25;
 const MAX_SAMPLE_BYTES = 250 * 1024;

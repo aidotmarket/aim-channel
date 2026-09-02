@@ -15,7 +15,7 @@ from app.models.dataset import DatasetRecord
 from app.models.data_verification import DataVerificationRun
 from app.routers.data_verification import router
 from app.schemas.data_verification import LifecycleCommand, QuoteProbeRequest, ScanSpecIssueRequest
-from app.services.data_verification_client import DataVerificationClient
+from app.services.data_verification_client import DataVerificationClient, DataVerificationClientError
 from app.services.marketplace_action_signer import canonical_json_bytes, canonical_payload_hash
 
 
@@ -164,6 +164,47 @@ async def test_lifecycle_client_contract_paths_claims_and_canonical_payloads():
             for action in ("cancel", "publish", "decline", "withdraw")
         ],
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "can_start_setup", "can_replace_payment_method"),
+    [
+        ("setup_required", 1, 0),
+        ("setup_pending", 0, 0),
+        ("ready", 0, 1),
+        ("blocked", 0, 0),
+    ],
+)
+async def test_payment_readiness_rejects_integer_boolean_substitutes(
+    state, can_start_setup, can_replace_payment_method
+):
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "version": "data_verification_payin_readiness_v1",
+                "state": state,
+                "can_start_setup": can_start_setup,
+                "can_replace_payment_method": can_replace_payment_method,
+                "message": "invalid integer flags",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DataVerificationClient(
+            base_url="https://backend.example",
+            seller_id="seller_fixture",
+            install_id="install_fixture",
+            install_private_key=Ed25519PrivateKey.generate(),
+            seller_access_token="seller-token",
+            http_client=http_client,
+        )
+        with pytest.raises(
+            DataVerificationClientError,
+            match="ai.market returned an invalid payment-readiness response",
+        ):
+            await client.payment_method_readiness()
 
 
 @pytest.mark.asyncio

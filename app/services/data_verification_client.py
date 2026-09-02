@@ -127,6 +127,8 @@ class DataVerificationClient:
             or not isinstance(state, str)
             or state not in expected_flags
             or not isinstance(payload.get("message"), str)
+            or not isinstance(payload.get("can_start_setup"), bool)
+            or not isinstance(payload.get("can_replace_payment_method"), bool)
             or (
                 payload.get("can_start_setup"),
                 payload.get("can_replace_payment_method"),

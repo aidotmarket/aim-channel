@@ -40,6 +40,14 @@ async def test_lifecycle_client_contract_paths_claims_and_canonical_payloads():
             claims = jwt.decode(authorization[7:], options={"verify_signature": False})
             assert claims["payload_hash"] == canonical_payload_hash(body)
         seen.append((request.method, request.url.path, claims and claims["action"]))
+        if route_name == "readiness":
+            return httpx.Response(200, json={
+                "version": "data_verification_payin_readiness_v1",
+                "state": "setup_required",
+                "can_start_setup": True,
+                "can_replace_payment_method": False,
+                "message": "Add a card only when starting paid data verification.",
+            })
         if route_name == "quote":
             return httpx.Response(200, json={
                 "quote_id": "quote_fixture", "depth_class": "complete_standard_v1",
@@ -84,6 +92,7 @@ async def test_lifecycle_client_contract_paths_claims_and_canonical_payloads():
             seller_access_token="seller-token",
             http_client=http_client,
         )
+        readiness = await client.payment_method_readiness()
         await client.quote(QuoteProbeRequest(
             listing_id=LISTING_ID,
             source_handle_id="dataset_fixture",
@@ -125,6 +134,7 @@ async def test_lifecycle_client_contract_paths_claims_and_canonical_payloads():
 
     expected = contract["routes"]
     requirements = contract["chunk_6_response_requirements"]
+    assert readiness == "setup_required"
     assert ingest.narrative == "Grounded allAI narrative fixture."
     assert ingest.listing_claim_comparison == "Listing claims match the deterministic scan fixture."
     assert status.state == "NARRATING_CLOUD"
@@ -144,6 +154,7 @@ async def test_lifecycle_client_contract_paths_claims_and_canonical_payloads():
     assert requirements["PaymentLifecycleStatus"]["must_carry_field"] == "withdrawn_at_utc"
     assert requirements["carried_item"]["id"] == "s3_pinned_archive_member_enumeration"
     assert seen == [
+        ("GET", "/api/v1/data-verification/payment-method/readiness", None),
         (expected["quote"]["method"], expected["quote"]["path_template"], expected["quote"]["expected_action"]),
         (expected["start"]["method"], expected["start"]["path_template"], expected["start"]["expected_action"]),
         (expected["report_ingest"]["method"], expected["report_ingest"]["path_template"], None),

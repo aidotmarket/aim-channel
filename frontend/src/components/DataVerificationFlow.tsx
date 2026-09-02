@@ -411,7 +411,30 @@ export function DataVerificationFlow({ datasetId, sourceName, listingId }: { dat
             </div>
             <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={publicationAck} onChange={(event) => setPublicationAck(event.target.checked)} /><span>{dataVerificationV1.copy.publicationAcknowledgement}</span></label>
             <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={corpusAck} onChange={(event) => setCorpusAck(event.target.checked)} /><span>{dataVerificationV1.copy.corpusAcknowledgement}</span></label>
-            <div className="flex flex-wrap gap-2"><Button variant="outline" onClick={() => { setPublicationAck(false); setCorpusAck(false); setStage("d6"); }}>Revise before authorization</Button><Button onClick={start} disabled={busy || !publicationAck || !corpusAck}>Accept maximum hold and start</Button></div>
+            {view.payment_setup_state && (
+              <section role="status" aria-label="Paid-service card setup" className="space-y-3 rounded border border-primary/30 bg-muted p-4 text-sm">
+                <h3 className="font-semibold">Card needed only for this paid verification</h3>
+                <p>
+                  {view.payment_setup_state === "setup_pending"
+                    ? "Stripe is still confirming the card for this paid service. No card is required for unpaid ai.market or AIM Data features."
+                    : view.payment_setup_state === "blocked"
+                      ? "Card setup for this paid service is unavailable. Contact ai.market support without sending card or billing details."
+                      : "Add a debit or credit card to authorize this paid verification. No card is required for unpaid ai.market or AIM Data features."}
+                </p>
+                {view.payment_setup_url && (
+                  <a href={view.payment_setup_url} target="_blank" rel="noopener noreferrer" className="inline-flex rounded bg-primary px-4 py-2 font-medium text-primary-foreground">
+                    Add or check card securely on ai.market
+                  </a>
+                )}
+                {view.payment_setup_url && <p>After ai.market confirms the card, return here and select the start button again.</p>}
+              </section>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={() => { setPublicationAck(false); setCorpusAck(false); setStage("d6"); }}>Revise before authorization</Button>
+              <Button onClick={start} disabled={busy || !publicationAck || !corpusAck || view.payment_setup_state === "blocked"}>
+                {view.payment_setup_state ? "Check card and start paid verification" : "Accept maximum hold and start paid verification"}
+              </Button>
+            </div>
           </section>
         )}
 

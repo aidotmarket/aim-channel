@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -27,6 +27,9 @@ from app.services.marketplace_action_signer import (
 
 class DataVerificationClientError(RuntimeError):
     """A display-safe control-plane failure with no reflected response body."""
+
+
+PayInReadinessState = Literal["setup_required", "setup_pending", "ready", "blocked"]
 
 
 @dataclass(frozen=True)
@@ -91,6 +94,49 @@ class DataVerificationClient:
             content=canonical_json_bytes(body),
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         )
+
+    async def payment_method_readiness(self) -> PayInReadinessState:
+        """Check card readiness only at the explicit paid-service boundary."""
+        response = await self._request(
+            "GET",
+            "/api/v1/data-verification/payment-method/readiness",
+            headers={"Authorization": f"Bearer {self._seller_access_token}"},
+        )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise DataVerificationClientError(
+                "ai.market returned an invalid payment-readiness response"
+            ) from exc
+        expected_keys = {
+            "version", "state", "can_start_setup", "can_replace_payment_method", "message"
+        }
+        if not isinstance(payload, dict) or set(payload) != expected_keys:
+            raise DataVerificationClientError(
+                "ai.market returned an invalid payment-readiness response"
+            )
+        state = payload.get("state")
+        expected_flags = {
+            "setup_required": (True, False),
+            "setup_pending": (False, False),
+            "ready": (False, True),
+            "blocked": (False, False),
+        }
+        if (
+            payload.get("version") != "data_verification_payin_readiness_v1"
+            or not isinstance(state, str)
+            or state not in expected_flags
+            or not isinstance(payload.get("message"), str)
+            or (
+                payload.get("can_start_setup"),
+                payload.get("can_replace_payment_method"),
+            )
+            != expected_flags[state]
+        ):
+            raise DataVerificationClientError(
+                "ai.market returned an invalid payment-readiness response"
+            )
+        return state
 
     async def quote(self, probe: QuoteProbeRequest) -> QuoteResponse:
         response = await self._signed_json(

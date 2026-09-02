@@ -347,6 +347,8 @@ export interface DataVerificationView {
   preview_requested: boolean;
   quote_probe: DataVerificationQuoteProbe | null;
   quote: DataVerificationQuote | null;
+  payment_setup_state: 'setup_required' | 'setup_pending' | 'blocked' | null;
+  payment_setup_url: string | null;
   payment_status: DataVerificationPaymentStatus | null;
   report_ingest: {
     verification_id: string;

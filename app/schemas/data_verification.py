@@ -210,6 +210,8 @@ class DataVerificationView(StrictModel):
     preview_requested: bool = False
     quote_probe: QuoteProbeView | None = None
     quote: QuoteResponse | None = None
+    payment_setup_state: Literal["setup_required", "setup_pending", "blocked"] | None = None
+    payment_setup_url: str | None = None
     payment_status: PaymentLifecycleStatus | None = None
     report_ingest: ReportIngestResponse | None = None
     findings: dict[str, Any] | None = None

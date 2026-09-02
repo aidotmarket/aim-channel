@@ -57,6 +57,7 @@ CANCEL_STATES = {
 START_LEASE_SECONDS = 30.0
 START_LEASE_HEARTBEAT_SECONDS = 5.0
 START_LEASE_POLL_SECONDS = 0.01
+PAYMENT_SETUP_URL = "https://ai.market/dashboard/data-verification/payment-method"
 
 
 class DataVerificationLocalError(RuntimeError):
@@ -127,7 +128,12 @@ def _active_publication(dataset_id: str) -> dict[str, Any] | None:
     return None
 
 
-def _view(dataset: DatasetRecord, run: DataVerificationRun | None) -> DataVerificationView:
+def _view(
+    dataset: DatasetRecord,
+    run: DataVerificationRun | None,
+    *,
+    payment_setup_state: str | None = None,
+) -> DataVerificationView:
     supported = dataset.status == "preview_ready" and dataset.original_filename.lower().endswith(SUPPORTED_SUFFIXES)
     unavailable = None
     if not data_verification_enabled():
@@ -157,6 +163,12 @@ def _view(dataset: DatasetRecord, run: DataVerificationRun | None) -> DataVerifi
         preview_requested=run.preview_requested if run else False,
         quote_probe=(QuoteProbeView.model_validate_json(run.probe_json) if run else None),
         quote=QuoteResponse.model_validate_json(run.quote_json) if run and run.quote_json else None,
+        payment_setup_state=payment_setup_state,
+        payment_setup_url=(
+            PAYMENT_SETUP_URL
+            if payment_setup_state in {"setup_required", "setup_pending"}
+            else None
+        ),
         payment_status=payment_status,
         report_ingest=(ReportIngestResponse.model_validate_json(run.report_ingest_json) if run and run.report_ingest_json else None),
         findings=_loads(run.report_json) if run and may_reveal else None,
@@ -565,6 +577,14 @@ async def start(
     run = _latest_run(dataset_id)
     if dataset is None or run is None or not run.quote_json:
         raise DataVerificationLocalError("a current verification quote is required")
+    if not run.verification_id and not run.start_claimed:
+        payment_setup_state = await client.payment_method_readiness()
+        if payment_setup_state != "ready":
+            return _view(
+                dataset,
+                run,
+                payment_setup_state=payment_setup_state,
+            )
     if not run.publication_terms_ack or not run.corpus_ack:
         run = _save_run(
             run.id,

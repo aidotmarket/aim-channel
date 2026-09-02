@@ -29,6 +29,8 @@ const baseView: DataVerificationView = {
   preview_requested: false,
   quote_probe: null,
   quote: null,
+  payment_setup_state: null,
+  payment_setup_url: null,
   payment_status: null,
   report_ingest: null,
   findings: null,
@@ -157,10 +159,36 @@ describe("DataVerificationFlow", () => {
     fireEvent.click(publication);
     fireEvent.click(corpus);
 
-    fireEvent.click(screen.getByRole("button", { name: "Accept maximum hold and start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Accept maximum hold and start paid verification" }));
     expect(await screen.findByText("Confirming final charge")).toBeInTheDocument();
     expect(screen.getByText(/Capture truth is being reconciled/)).toBeInTheDocument();
     expect(screen.queryByLabelText("Captured scan review")).not.toBeInTheDocument();
+  });
+
+  it("asks for a card only after the seller explicitly starts the paid verification", async () => {
+    vi.mocked(dataVerificationApi.get).mockResolvedValue(quoteView);
+    vi.mocked(dataVerificationApi.start).mockResolvedValue({
+      ...quoteView,
+      payment_setup_state: "setup_required",
+      payment_setup_url: "https://ai.market/dashboard/data-verification/payment-method",
+    });
+    render(<DataVerificationFlow datasetId="ds-1" sourceName="problems.csv" listingId={baseView.listing_id} />);
+
+    const publication = await screen.findByLabelText(dataVerificationV1.copy.publicationAcknowledgement);
+    const corpus = screen.getByLabelText(dataVerificationV1.copy.corpusAcknowledgement);
+    expect(screen.queryByText("Card needed only for this paid verification")).not.toBeInTheDocument();
+    fireEvent.click(publication);
+    fireEvent.click(corpus);
+    fireEvent.click(screen.getByRole("button", { name: "Accept maximum hold and start paid verification" }));
+
+    expect(await screen.findByText("Card needed only for this paid verification")).toBeInTheDocument();
+    expect(screen.getByText(/No card is required for unpaid ai.market or AIM Data features/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Add or check card securely on ai.market" })).toHaveAttribute(
+      "href",
+      "https://ai.market/dashboard/data-verification/payment-method",
+    );
+    expect(screen.getByRole("button", { name: "Check card and start paid verification" })).toBeEnabled();
+    expect(screen.queryByText("Authorizing maximum card hold")).not.toBeInTheDocument();
   });
 
   it("reveals only captured findings and presents publish and decline as equal explicit choices", async () => {
@@ -205,7 +233,7 @@ describe("DataVerificationFlow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start a paid rerun" }));
     expect(screen.getByText("Data domain")).toBeInTheDocument();
     expect(screen.getByText("Scan findings — 2026-08-21")).toBeInTheDocument();
-    expect(screen.getByText(/9d80b54af5f7134ae57ca1562f08bcc8/)).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(String(reportFixture.fingerprint_hash).slice(0, 32)))).toBeInTheDocument();
     expect(screen.getByText(dataVerificationV1.copy.disclaimer.replace("[scan date]", "2026-08-21"))).toBeInTheDocument();
     fireEvent.change(screen.getByRole("combobox", { name: /Data domain/ }), { target: { value: "education_learning" } });
     fireEvent.change(screen.getByRole("combobox", { name: /One record represents/ }), { target: { value: "entity" } });
@@ -234,7 +262,7 @@ describe("DataVerificationFlow", () => {
       "hll-sha256-v1",
       "fixed-buckets-v1",
       "python-json-sort-compact-v1",
-      "9d80b54af5f7134ae57ca1562f08bcc884879031f60a2491d233bc556ce8ab28",
+      String(reportFixture.fingerprint_hash),
       "1d9c5b63a227f77e0ee3ce97f571d808ca62420934425f03bbd8f2770c03a698",
       "row_count: 12",
       "row_count_method: exact",
@@ -246,7 +274,7 @@ describe("DataVerificationFlow", () => {
     }
     expect(within(review).getByText(/relative_error_ppm.*91924/)).toBeInTheDocument();
     expect(within(review).getByText(/length_histograms: not applicable.*12/)).toBeInTheDocument();
-    expect(within(review).getByText(/numeric_range_buckets: 0.*9.*3/)).toBeInTheDocument();
+    expect(within(review).getByText(/numeric_range_buckets: suppressed.*not applicable.*suppressed/)).toBeInTheDocument();
     expect(within(review).getByText("Objects discovered: 1")).toBeInTheDocument();
     expect(within(review).getByText("Objects scanned: 1")).toBeInTheDocument();
     expect(within(review).getAllByText("None returned.")).toHaveLength(2);

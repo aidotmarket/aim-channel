@@ -83,6 +83,8 @@ class FakeClient:
     def __init__(self, final_state: str = "CAPTURED"):
         self.final_state = final_state
         self.quote_calls = 0
+        self.readiness_calls = 0
+        self.payment_setup_state = "ready"
         self.start_requests = 0
         self.start_calls = 0
         self.ingest_calls = 0
@@ -92,6 +94,10 @@ class FakeClient:
         self.last_report = None
         self.last_probe = None
         self._issued_specs = {}
+
+    async def payment_method_readiness(self):
+        self.readiness_calls += 1
+        return self.payment_setup_state
 
     async def quote(self, probe):
         self.quote_calls += 1
@@ -274,6 +280,47 @@ async def test_quote_start_capture_resume_and_publish_are_idempotent(tmp_path, m
     published = await lifecycle_command(dataset_id, "publish", client=client)
     assert published.state == "PUBLISHED"
     assert client.commands[-1].requested_action == "publish"
+
+
+@pytest.mark.asyncio
+async def test_card_is_requested_only_at_paid_start_and_retry_resumes_cleanly(tmp_path, monkeypatch):
+    dataset_id = make_dataset(tmp_path, monkeypatch)
+    client = FakeClient()
+    client.payment_setup_state = "setup_required"
+    scanner = FakeScanner(dataset_id)
+    await prepare_quote(dataset_id, prepare_body(), client=client)
+
+    setup = await start(
+        dataset_id,
+        request=start_body(),
+        client=client,
+        scanner=scanner,
+        install_id="install_fixture",
+        install_private_key=object(),
+    )
+
+    assert setup.state == "QUOTED"
+    assert setup.payment_setup_state == "setup_required"
+    assert setup.payment_setup_url == "https://ai.market/dashboard/data-verification/payment-method"
+    assert (client.readiness_calls, client.start_requests, scanner.calls) == (1, 0, 0)
+    with get_session_context() as session:
+        run = session.exec(select(DataVerificationRun).where(DataVerificationRun.id == setup.run_id)).one()
+        assert run.publication_terms_ack is False
+        assert run.corpus_ack is False
+        assert run.start_claimed is False
+
+    client.payment_setup_state = "ready"
+    captured = await start(
+        dataset_id,
+        request=start_body(),
+        client=client,
+        scanner=scanner,
+        install_id="install_fixture",
+        install_private_key=object(),
+    )
+    assert captured.state == "CAPTURED"
+    assert captured.payment_setup_state is None
+    assert (client.readiness_calls, client.start_requests, scanner.calls) == (2, 1, 1)
 
 
 @pytest.mark.asyncio
@@ -893,6 +940,7 @@ async def test_restart_recovers_start_claim_without_verification_identity(
         start_claimed=True,
         scan_claimed=False,
     )
+    client.payment_setup_state = "blocked"
     recovered = await start(
         dataset_id,
         request=start_body(),
@@ -903,6 +951,7 @@ async def test_restart_recovers_start_claim_without_verification_identity(
     )
 
     assert recovered.state == "CAPTURED"
+    assert client.readiness_calls == 0
     assert (client.start_calls, client.ingest_calls, scanner.calls) == (1, 1, 1)
     assert recovered.payment_status.verification_id == client.verification_id
 

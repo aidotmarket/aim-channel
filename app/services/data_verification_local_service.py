@@ -577,7 +577,7 @@ async def start(
     run = _latest_run(dataset_id)
     if dataset is None or run is None or not run.quote_json:
         raise DataVerificationLocalError("a current verification quote is required")
-    if not run.verification_id:
+    if not run.verification_id and not run.start_claimed:
         payment_setup_state = await client.payment_method_readiness()
         if payment_setup_state != "ready":
             return _view(

@@ -940,6 +940,7 @@ async def test_restart_recovers_start_claim_without_verification_identity(
         start_claimed=True,
         scan_claimed=False,
     )
+    client.payment_setup_state = "blocked"
     recovered = await start(
         dataset_id,
         request=start_body(),
@@ -950,6 +951,7 @@ async def test_restart_recovers_start_claim_without_verification_identity(
     )
 
     assert recovered.state == "CAPTURED"
+    assert client.readiness_calls == 0
     assert (client.start_calls, client.ingest_calls, scanner.calls) == (1, 1, 1)
     assert recovered.payment_status.verification_id == client.verification_id
 

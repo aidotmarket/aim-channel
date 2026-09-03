@@ -15,6 +15,8 @@ UPDATED:
 import logging
 import os
 import re
+from urllib.parse import urlparse
+
 from pydantic_settings import BaseSettings
 from pydantic import AliasChoices, Field, field_validator
 from typing import List, Optional
@@ -24,6 +26,13 @@ import psutil
 logger = logging.getLogger(__name__)
 
 _DEFAULT_AI_MARKET_URL = "https://ai-market-backend-production.up.railway.app"
+_DEFAULT_DATA_VERIFICATION_PAYMENT_HANDOFF_URL = (
+    "https://ai.market/dashboard/data-verification/payment-method"
+)
+_DATA_VERIFICATION_PAYMENT_HANDOFF_URL_ERROR = (
+    "payment handoff URL must be HTTPS without credentials or use the "
+    "http://localhost:13000 test origin"
+)
 _IAM_PRINCIPAL_ARN_RE = re.compile(r"^arn:aws:iam::\d{12}:(role|user)/.+$")
 
 
@@ -108,6 +117,13 @@ class Settings(BaseSettings):
     ai_market_url: str = Field(
         default=_DEFAULT_AI_MARKET_URL,
         validation_alias=_env_alias("ai_market_url"),
+    )
+    data_verification_payment_handoff_url: str = Field(
+        default=_DEFAULT_DATA_VERIFICATION_PAYMENT_HANDOFF_URL,
+        validation_alias=AliasChoices(
+            "AIM_DATA_PAYMENT_SETUP_URL",
+            "VECTORAIZ_PAYMENT_SETUP_URL",
+        ),
     )
     auth_enabled: bool = Field(
         default=True,
@@ -286,6 +302,25 @@ class Settings(BaseSettings):
                 or _DEFAULT_AI_MARKET_URL
             )
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("data_verification_payment_handoff_url")
+    @classmethod
+    def _validate_data_verification_payment_handoff_url(cls, value: str) -> str:
+        try:
+            if not value or any(character.isspace() for character in value):
+                raise ValueError
+            parsed = urlparse(value)
+            host = parsed.hostname
+            parsed.port  # Validate an explicitly supplied port while parsing.
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(_DATA_VERIFICATION_PAYMENT_HANDOFF_URL_ERROR) from exc
+
+        has_credentials = parsed.username is not None or parsed.password is not None
+        valid_https = parsed.scheme == "https" and bool(host) and not has_credentials
+        valid_test_http = parsed.scheme == "http" and parsed.netloc == "localhost:13000"
+        if not (valid_https or valid_test_http):
+            raise ValueError(_DATA_VERIFICATION_PAYMENT_HANDOFF_URL_ERROR)
+        return value
 
     def model_post_init(self, __context) -> None:
         if not self.allowed_raw_file_dirs:

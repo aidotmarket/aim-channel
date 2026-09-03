@@ -10,8 +10,10 @@ from uuid import NAMESPACE_URL, uuid5
 import pytest
 import pyarrow as pa
 import pyarrow.parquet as pq
+from pydantic import ValidationError
 from sqlmodel import SQLModel, select
 
+from app.config import Settings
 from app.core.database import get_engine, get_session_context
 from app.models.data_verification import DataVerificationRun
 from app.models.dataset import DatasetRecord
@@ -52,6 +54,19 @@ VALID_D6 = D6Description(
     update_cadence="one_time",
     intended_use_tags=("analysis_reporting",),
     known_limitation_tags=(),
+)
+PRODUCTION_PAYMENT_HANDOFF_URL = "https://ai.market/dashboard/data-verification/payment-method"
+S1656_PAYMENT_HANDOFF_URL = "http://localhost:13000/dashboard/data-verification/payment-method"
+PAYMENT_HANDOFF_URL_ERROR = (
+    "payment handoff URL must be HTTPS without credentials or use the "
+    "http://localhost:13000 test origin"
+)
+PAYMENT_HANDOFF_ENV_NAMES = (
+    "AIM_DATA_PAYMENT_SETUP_URL",
+    "VECTORAIZ_PAYMENT_SETUP_URL",
+    "AIM_DATA_DATA_VERIFICATION_PAYMENT_HANDOFF_URL",
+    "VECTORAIZ_DATA_VERIFICATION_PAYMENT_HANDOFF_URL",
+    "data_verification_payment_handoff_url",
 )
 
 
@@ -239,6 +254,126 @@ def _zip_payload(members: dict[str, bytes]) -> bytes:
         for name, payload in members.items():
             archive.writestr(name, payload)
     return stream.getvalue()
+
+
+def _clear_payment_handoff_env(monkeypatch) -> None:
+    for name in PAYMENT_HANDOFF_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_payment_handoff_url_defaults_to_production(monkeypatch):
+    _clear_payment_handoff_env(monkeypatch)
+
+    configured = Settings(_env_file=None)
+
+    assert configured.data_verification_payment_handoff_url == PRODUCTION_PAYMENT_HANDOFF_URL
+
+
+@pytest.mark.parametrize(
+    "supported_alias",
+    ["AIM_DATA_PAYMENT_SETUP_URL", "VECTORAIZ_PAYMENT_SETUP_URL"],
+)
+def test_payment_handoff_url_accepts_only_explicit_aliases(monkeypatch, supported_alias):
+    _clear_payment_handoff_env(monkeypatch)
+    monkeypatch.setenv(supported_alias, S1656_PAYMENT_HANDOFF_URL)
+
+    configured = Settings(_env_file=None)
+
+    assert configured.data_verification_payment_handoff_url == S1656_PAYMENT_HANDOFF_URL
+
+
+@pytest.mark.parametrize(
+    "unsupported_alias",
+    [
+        "AIM_DATA_DATA_VERIFICATION_PAYMENT_HANDOFF_URL",
+        "VECTORAIZ_DATA_VERIFICATION_PAYMENT_HANDOFF_URL",
+    ],
+)
+def test_payment_handoff_url_ignores_field_name_derived_aliases(monkeypatch, unsupported_alias):
+    _clear_payment_handoff_env(monkeypatch)
+    monkeypatch.setenv(unsupported_alias, S1656_PAYMENT_HANDOFF_URL)
+
+    assert Settings(_env_file=None).data_verification_payment_handoff_url == PRODUCTION_PAYMENT_HANDOFF_URL
+
+    explicit_url = "https://payments.example.test/verification/setup"
+    monkeypatch.setenv("AIM_DATA_PAYMENT_SETUP_URL", explicit_url)
+    monkeypatch.setenv(unsupported_alias, "https://ignored.example.test/override")
+
+    assert Settings(_env_file=None).data_verification_payment_handoff_url == explicit_url
+
+
+def test_payment_handoff_url_accepts_non_default_https(monkeypatch):
+    _clear_payment_handoff_env(monkeypatch)
+    configured_url = "https://payments.example.test/verification/setup?source=aim-data"
+    monkeypatch.setenv("AIM_DATA_PAYMENT_SETUP_URL", configured_url)
+
+    configured = Settings(_env_file=None)
+
+    assert configured.data_verification_payment_handoff_url == configured_url
+
+
+def test_payment_handoff_url_accepts_local_test_origin_with_varied_path(monkeypatch):
+    _clear_payment_handoff_env(monkeypatch)
+    configured_url = "http://localhost:13000/test/payment/setup?listing=example"
+    monkeypatch.setenv("AIM_DATA_PAYMENT_SETUP_URL", configured_url)
+
+    configured = Settings(_env_file=None)
+
+    assert configured.data_verification_payment_handoff_url == configured_url
+
+
+@pytest.mark.parametrize(
+    "invalid_url",
+    [
+        "http://localhost:13001/dashboard/data-verification/payment-method",
+        "http://127.0.0.1:13000/dashboard/data-verification/payment-method",
+        "http://host.docker.internal:13000/dashboard/data-verification/payment-method",
+        "https://user:password@payments.example.test/setup",
+        "ftp://payments.example.test/setup",
+        "",
+        "not a URL",
+    ],
+)
+def test_payment_handoff_url_rejects_disallowed_or_malformed_values(monkeypatch, invalid_url):
+    _clear_payment_handoff_env(monkeypatch)
+    monkeypatch.setenv("AIM_DATA_PAYMENT_SETUP_URL", invalid_url)
+
+    with pytest.raises(ValidationError, match=PAYMENT_HANDOFF_URL_ERROR):
+        Settings(_env_file=None)
+
+
+@pytest.mark.parametrize(
+    ("payment_setup_state", "expected_url"),
+    [
+        ("setup_required", S1656_PAYMENT_HANDOFF_URL),
+        ("setup_pending", S1656_PAYMENT_HANDOFF_URL),
+        ("blocked", None),
+        (None, None),
+    ],
+)
+def test_view_carries_configured_payment_handoff_only_in_setup_states(
+    tmp_path,
+    monkeypatch,
+    payment_setup_state,
+    expected_url,
+):
+    dataset_id = make_dataset(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        local_service.settings,
+        "data_verification_payment_handoff_url",
+        S1656_PAYMENT_HANDOFF_URL,
+    )
+    with get_session_context() as session:
+        dataset = session.get(DatasetRecord, dataset_id)
+
+    view = local_service._view(
+        dataset,
+        None,
+        payment_setup_state=payment_setup_state,
+    )
+
+    assert view.payment_setup_state == payment_setup_state
+    assert view.payment_setup_url == expected_url
 
 
 @pytest.mark.asyncio

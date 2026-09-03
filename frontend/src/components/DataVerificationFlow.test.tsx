@@ -170,7 +170,7 @@ describe("DataVerificationFlow", () => {
     vi.mocked(dataVerificationApi.start).mockResolvedValue({
       ...quoteView,
       payment_setup_state: "setup_required",
-      payment_setup_url: "https://ai.market/dashboard/data-verification/payment-method",
+      payment_setup_url: "http://localhost:13000/dashboard/data-verification/payment-method",
     });
     render(<DataVerificationFlow datasetId="ds-1" sourceName="problems.csv" listingId={baseView.listing_id} />);
 
@@ -185,7 +185,7 @@ describe("DataVerificationFlow", () => {
     expect(screen.getByText(/No card is required for unpaid ai.market or AIM Data features/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Add or check card securely on ai.market" })).toHaveAttribute(
       "href",
-      "https://ai.market/dashboard/data-verification/payment-method",
+      "http://localhost:13000/dashboard/data-verification/payment-method",
     );
     expect(screen.getByRole("button", { name: "Check card and start paid verification" })).toBeEnabled();
     expect(screen.queryByText("Authorizing maximum card hold")).not.toBeInTheDocument();

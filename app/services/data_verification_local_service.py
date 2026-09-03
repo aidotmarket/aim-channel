@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import or_, update
 from sqlmodel import select
 
+from app.config import settings
 from app.core.database import get_session_context
 from app.models.data_verification import DataVerificationRun
 from app.models.dataset import DatasetRecord
@@ -57,7 +58,6 @@ CANCEL_STATES = {
 START_LEASE_SECONDS = 30.0
 START_LEASE_HEARTBEAT_SECONDS = 5.0
 START_LEASE_POLL_SECONDS = 0.01
-PAYMENT_SETUP_URL = "https://ai.market/dashboard/data-verification/payment-method"
 
 
 class DataVerificationLocalError(RuntimeError):
@@ -165,7 +165,7 @@ def _view(
         quote=QuoteResponse.model_validate_json(run.quote_json) if run and run.quote_json else None,
         payment_setup_state=payment_setup_state,
         payment_setup_url=(
-            PAYMENT_SETUP_URL
+            settings.data_verification_payment_handoff_url
             if payment_setup_state in {"setup_required", "setup_pending"}
             else None
         ),

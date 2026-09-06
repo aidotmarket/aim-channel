@@ -309,12 +309,14 @@ export function ListingPreparation({
   onDelete,
   isDeleting,
   draftListingId: initialDraftListingId,
+  onDatasetRefresh,
 }: {
   dataset: ApiDataset;
   backPath: string;
   onDelete: () => void;
   isDeleting: boolean;
   draftListingId: string | null;
+  onDatasetRefresh?: (dataset: ApiDataset) => void;
 }) {
   const navigate = useNavigate();
   const {
@@ -356,6 +358,8 @@ export function ListingPreparation({
   const [finalDisclosureConfirmed, setFinalDisclosureConfirmed] = useState(false);
   const [disclosureFailure, setDisclosureFailure] = useState<DisclosureSnapshotFailure | null>(null);
   const [publishedListingId, setPublishedListingId] = useState<string | null>(dataset.listing_id ?? null);
+  const [publishComplete, setPublishComplete] = useState(false);
+  const [publishedListingUrl, setPublishedListingUrl] = useState<string | null>(null);
   const [retrySnapshotPayload, setRetrySnapshotPayload] = useState<DisclosureSnapshotPayload | null>(null);
 
   const datasetReady = dataset.status === "preview_ready";
@@ -630,21 +634,31 @@ export function ListingPreparation({
     return `op-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   };
 
-  const submitDisclosureSnapshot = async (listingId: string, payload: DisclosureSnapshotPayload) => {
+  const submitDisclosureSnapshot = async (listingId: string, payload: DisclosureSnapshotPayload, listingUrl = publishedListingUrl) => {
     const request = { dataset_id: dataset.id, ...payload } satisfies DisclosureSnapshotProxyRequest;
-    const response = await marketplaceApi.createDisclosureSnapshot(
+    await marketplaceApi.createDisclosureSnapshot(
       listingId,
       request
     );
     setPublishedListingId(listingId);
     setRetrySnapshotPayload(null);
     setDisclosureFailure(null);
+    setPublishComplete(true);
     toast({
-      title: "Live on ai.market",
-      description: response.disclosure_version
-        ? `Disclosure snapshot ${response.disclosure_version} is stored.`
-        : "Disclosure snapshot is stored.",
+      title: "Dataset published to ai.market",
+      description: (
+        <a href={listingUrl || `https://ai.market/listing/${encodeURIComponent(listingId)}`} target="_blank" rel="noopener noreferrer" className="underline">
+          View listing on ai.market
+        </a>
+      ),
     });
+    try {
+      const refreshed = await datasetsApi.get(dataset.id);
+      onDatasetRefresh?.(refreshed);
+    } catch (error) {
+      // A refresh failure must not turn a stored snapshot into a disclosure retry.
+      console.warn("Published dataset refresh failed", error);
+    }
   };
 
   const buildCurrentDisclosurePayload = (sourcePublishOperationId: string) => {
@@ -688,6 +702,7 @@ export function ListingPreparation({
   };
 
   const handlePublish = async () => {
+    if (publishing || publishedListingId) return;
     setDisclosureFailure(null);
     const price = Number.parseFloat(form.priceUsd);
     if (!form.title.trim()) {
@@ -750,9 +765,10 @@ export function ListingPreparation({
         throw new Error("ai.market did not return a listing_id.");
       }
       setPublishedListingId(listingId);
+      setPublishedListingUrl(publishResponse.marketplace_url ?? null);
       setRetrySnapshotPayload(disclosurePayload);
       try {
-        await submitDisclosureSnapshot(listingId, disclosurePayload);
+        await submitDisclosureSnapshot(listingId, disclosurePayload, publishResponse.marketplace_url);
       } catch (snapshotError) {
         const failure = classifyDisclosureSnapshotFailure(snapshotError);
         setDisclosureFailure(failure);
@@ -870,11 +886,11 @@ export function ListingPreparation({
           </div>
           <div className="rounded-md border p-3">
             <div className="flex items-center gap-2 text-sm font-medium">
-              <StepIcon state={activeStep === 3 ? "passed" : "not_run"} />
+              <StepIcon state={publishComplete ? "passed" : "not_run"} />
               3. Listing Details and Disclosure
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              {activeStep === 3 ? "Editor unlocked" : "Waiting for metadata approval"}
+              {publishComplete ? "Complete" : publishedListingId ? "Listing published, disclosure snapshot pending" : activeStep === 3 ? "Editor unlocked" : "Waiting for metadata approval"}
             </p>
           </div>
         </CardContent>
@@ -1286,12 +1302,12 @@ export function ListingPreparation({
 
             <Button
               onClick={handlePublish}
-              disabled={publishing || !finalDisclosureConfirmed || !approvedMetadataDraft || (sampleDecision === "approved_rows" && !approvedSample)}
+              disabled={Boolean(publishedListingId) || publishing || !finalDisclosureConfirmed || !approvedMetadataDraft || (sampleDecision === "approved_rows" && !approvedSample)}
               size="sm"
               className="gap-2"
             >
               {publishing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Store className="h-4 w-4" />}
-              {publishing ? "Publishing..." : "Publish to ai.market"}
+              {publishedListingId ? "Published" : publishing ? "Publishing..." : "Publish to ai.market"}
             </Button>
           </CardContent>
         </Card>
@@ -1458,6 +1474,7 @@ const DatasetDetail = () => {
     return (
       <ListingPreparation
         dataset={apiDataset}
+        onDatasetRefresh={setApiDataset}
         draftListingId={apiDataset.listing_id ?? null}
         backPath={backPath}
         onDelete={handleDelete}

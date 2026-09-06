@@ -1,8 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { datasetsApi, piiApi, type ApiDataset, type DatasetListingMetadata, type PIIScanResponse } from "@/lib/api";
+import { datasetsApi, marketplaceApi, piiApi, type ApiDataset, type DatasetListingMetadata, type PIIScanResponse } from "@/lib/api";
+import { toast } from "@/hooks/use-toast";
+import { AIM_CHANNEL_DISCLOSURE_CONFIRMATION_COPY } from "@/lib/disclosure";
 import { DisclosureSnapshotFailurePanel, ListingPreparation } from "./DatasetDetail";
+
+vi.mock("@/hooks/use-toast", () => ({ toast: vi.fn() }));
 
 vi.mock("@/contexts/CoPilotContext", () => ({
   useCoPilot: () => ({
@@ -75,11 +79,12 @@ function dataset(metadata: DatasetListingMetadata | null = null): ApiDataset {
   };
 }
 
-function renderPreparation(apiDataset: ApiDataset) {
+function renderPreparation(apiDataset: ApiDataset, onDatasetRefresh = vi.fn()) {
   return render(
     <MemoryRouter>
       <ListingPreparation
         dataset={apiDataset}
+        onDatasetRefresh={onDatasetRefresh}
         draftListingId={apiDataset.listing_id ?? null}
         backPath="/datasets"
         onDelete={vi.fn()}
@@ -92,6 +97,7 @@ function renderPreparation(apiDataset: ApiDataset) {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.clearAllMocks();
 });
 
 describe("seller listing preparation", () => {
@@ -172,5 +178,94 @@ describe("disclosure snapshot failure panel", () => {
     );
 
     expect(screen.getByRole("button", { name: "Retry disclosure snapshot" })).toBeEnabled();
+  });
+});
+
+
+describe("publish completion", () => {
+  async function preparePublish(onDatasetRefresh = vi.fn()) {
+    vi.spyOn(piiApi, "getConfig").mockResolvedValue({
+      dataset_id: "ds-1", column_actions: {}, privacy_attested: false, updated_at: null,
+    });
+    vi.spyOn(piiApi, "getScan").mockResolvedValue(cleanScan);
+    vi.spyOn(datasetsApi, "getDisclosureSample").mockResolvedValue({
+      dataset_id: "ds-1", sample: [], count: 0,
+    });
+    const publish = vi.spyOn(marketplaceApi, "publish").mockResolvedValue({
+      status: "published", listing_id: "listing-1", marketplace_url: "https://ai.market/listing/listing-1",
+    });
+    renderPreparation(dataset(listingMetadata), onDatasetRefresh);
+    fireEvent.click(await screen.findByRole("button", { name: "Accept all & continue" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: AIM_CHANNEL_DISCLOSURE_CONFIRMATION_COPY }));
+    fireEvent.click(screen.getByRole("button", { name: "Publish to ai.market" }));
+    return publish;
+  }
+
+  function expectSuccessToast() {
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: "Dataset published to ai.market" }));
+    const confirmation = vi.mocked(toast).mock.calls.find(([message]) => message.title === "Dataset published to ai.market")![0];
+    render(<>{confirmation.description}</>);
+    expect(screen.getByRole("link", { name: "View listing on ai.market" })).toHaveAttribute("href", "https://ai.market/listing/listing-1");
+  }
+
+  it("confirms completion, disables Publish and refetches the dataset for the published view", async () => {
+    vi.spyOn(marketplaceApi, "createDisclosureSnapshot").mockResolvedValue({
+      status: "complete", listing_id: "listing-1", disclosure_version: "v1",
+    });
+    const refreshed = { ...dataset(listingMetadata), listing_id: "listing-1" };
+    const refetch = vi.spyOn(datasetsApi, "get").mockResolvedValue(refreshed);
+    const onDatasetRefresh = vi.fn();
+    const publish = await preparePublish(onDatasetRefresh);
+
+    await waitFor(() => expect(onDatasetRefresh).toHaveBeenCalledWith(refreshed));
+    expectSuccessToast();
+    expect(refetch).toHaveBeenCalledWith("ds-1");
+    expect(screen.getByText("Complete")).toBeInTheDocument();
+    const published = screen.getByRole("button", { name: "Published" });
+    expect(published).toBeDisabled();
+    fireEvent.click(published);
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Retry disclosure snapshot" })).not.toBeInTheDocument();
+  });
+
+  it("keeps Publish disabled after snapshot failure and retries only the snapshot", async () => {
+    const snapshot = vi.spyOn(marketplaceApi, "createDisclosureSnapshot")
+      .mockRejectedValueOnce(new Error("Service unavailable"))
+      .mockResolvedValueOnce({ status: "complete", listing_id: "listing-1", disclosure_version: "v1" });
+    const refetch = vi.spyOn(datasetsApi, "get").mockResolvedValue({ ...dataset(), listing_id: "listing-1" });
+    const publish = await preparePublish();
+
+    const retry = await screen.findByRole("button", { name: "Retry disclosure snapshot" });
+    expect(retry).toBeEnabled();
+    expect(screen.getAllByText("Listing published, disclosure snapshot pending").length).toBeGreaterThan(0);
+    const published = screen.getByRole("button", { name: "Published" });
+    expect(published).toBeDisabled();
+    fireEvent.click(published);
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(refetch).not.toHaveBeenCalled();
+    expect(screen.queryByText("Complete")).not.toBeInTheDocument();
+
+    fireEvent.click(retry);
+    await waitFor(() => expect(refetch).toHaveBeenCalledWith("ds-1"));
+    expectSuccessToast();
+    expect(snapshot).toHaveBeenCalledTimes(2);
+    expect(snapshot.mock.calls[1]).toEqual(snapshot.mock.calls[0]);
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Published" })).toBeDisabled();
+  });
+
+  it("preserves successful publication if the dataset refresh fails", async () => {
+    vi.spyOn(marketplaceApi, "createDisclosureSnapshot").mockResolvedValue({
+      status: "complete", listing_id: "listing-1", disclosure_version: "v1",
+    });
+    vi.spyOn(datasetsApi, "get").mockRejectedValue(new Error("Network unavailable"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await preparePublish();
+
+    await waitFor(() => expect(console.warn).toHaveBeenCalled());
+    expectSuccessToast();
+    expect(screen.getByText("Complete")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Published" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Retry disclosure snapshot" })).not.toBeInTheDocument();
   });
 });
